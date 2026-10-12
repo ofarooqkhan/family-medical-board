@@ -118,9 +118,10 @@ Items 1 through 17. Nothing beyond A0.
 
 ### Git state
 - Working repo: `/home/user/Omer-`, remote `https://github.com/ofarooqkhan/Omer-`.
-  Branch `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` has
-  two local commits (`c198775`, `303d4c5`) that are NOT pushed. Origin has
-  zero commits. Push is blocked by revoked GitHub App access, see 6.1.
+  Branch `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` is
+  pushed and tracking origin. Commits so far: `c198775` snapshot and
+  handoff, `303d4c5` utils and database, `23c7ce0` handoff update, plus the
+  commit that records this fix.
 - Reference clone: `/home/user/medical-board-history`, one commit `206f97f`
   on `main`. Read only in practice. Byte-identical to the zip the owner
   uploaded. Stale legacy code. Do not develop here.
@@ -394,29 +395,18 @@ On Replit the app runs with the command in `replit_snapshot/.replit`.
 
 ## 6. Open bugs and verbatim errors
 
-### 6.1 BLOCKER: push to Omer- is rejected, GitHub App access revoked
-Two commits exist locally and are NOT on origin:
-```
-303d4c5 A0 work in progress: utils helpers and scoped database layer
-c198775 Add Replit source snapshot and handoff document
-```
-Earlier in the session a dry-run push succeeded. Now every push fails, six
-attempts with backoff plus one after re-attaching the repo with push access:
+### 6.1 Resolved: push to Omer- works again after the owner reconnected GitHub
+Mid-session every push failed with:
 ```
 remote: Claude doesn't have GitHub access to ofarooqkhan/Omer- for your organization. An org admin can install the Claude GitHub App at https://github.com/apps/claude/installations/select_target, or reconnect GitHub from claude.ai settings (https://claude.ai/customize/connectors?auth_start=github&auth_start_force=1) to re-link an existing installation
 fatal: unable to access 'https://github.com/ofarooqkhan/Omer-/': The requested URL returned error: 403
 ```
-This is an owner-side fix, not a code fix. The owner must either reconnect
-GitHub at https://claude.ai/connect-github or install the Claude GitHub App
-on `ofarooqkhan/Omer-` from
-https://github.com/apps/claude/installations/select_target. After that, a
-fresh session with `Omer-` selected, or `add_repo` in this one, then:
-```
-git push -u origin claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt
-```
-Until the push lands, this container is the only copy of the two commits.
-If the container is reclaimed first, the work is reconstructable from this
-document plus `replit_snapshot/`, but it is faster to push.
+The owner reconnected GitHub from claude.ai settings and the next push
+succeeded. If this recurs, it is the same owner-side fix. The branch is now
+on origin; `git status -sb` shows it tracking
+`origin/claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt`.
+The harmless warning `fatal: expected 'acknowledgments', received 'packfile'
+... proceeding anyway with push` is the session git proxy and can be ignored.
 
 ### 6.2 gh CLI token invalid
 ```
@@ -621,9 +611,6 @@ python3 -m pytest tests/ -q
 ```
 All tests must pass. Do not install the full requirements just to run unit
 tests; `tests/test_utils.py` imports only `utils`.
-
-### 8.0 Before anything else: push the two existing commits
-See 6.1. Once GitHub access is restored, push first, then continue.
 
 ### 8.6 Commit and push
 Commits 1 and 2 below already exist as `c198775` and `303d4c5` (commit 2 is
