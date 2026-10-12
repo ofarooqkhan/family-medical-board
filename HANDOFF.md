@@ -14,8 +14,8 @@ never give medical advice. Source records are paper prescriptions, lab reports,
 and imaging reports (paper, PDF, or DICOM) photographed or uploaded by the
 caregiver. Hosted on Replit with Replit managed Postgres.
 
-Owner: ofarooqkhan (GitHub), omerfk@gmail.com. Not a software engineer; wants
-decisions explained in plain terms and recommended, not surveyed.
+Owner: ofarooqkhan (GitHub). Not a software engineer; wants decisions
+explained in plain terms and recommended, not surveyed.
 
 The spec, verbatim, with done-when criteria:
 
