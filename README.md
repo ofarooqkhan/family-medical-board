@@ -13,3 +13,5 @@ Locally with Docker: `export OPENAI_API_KEY=sk-...` then `docker compose up --bu
 On Render: push the repo to GitHub, then in the Render dashboard choose New, then Blueprint, and select the repo. `render.yaml` defines one Docker web service and one Postgres database and wires `DATABASE_URL` between them. Render prompts for `OPENAI_API_KEY` (required) and `ANTHROPIC_API_KEY` (not used yet, can be left blank) when the Blueprint is created; both can be changed later under the service's Environment tab. Every push to the connected branch redeploys.
 
 Whoever signs up first on a fresh database becomes the admin and can invite the rest of the family from the app.
+
+To try the whole flow without a model key, set `MODEL_PROVIDER=demo`; every extraction and board answer is then labeled as demo output. Set `OPENAI_API_KEY` and remove `MODEL_PROVIDER` for real runs.

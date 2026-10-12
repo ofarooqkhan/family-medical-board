@@ -1,7 +1,8 @@
 # HANDOFF
 
-Written 2026-10-12 at the end of the Step 0 audit session. Updated the same
-day by the session that finished A0 and item 1.
+Written 2026-10-12 at the end of the Step 0 audit session. Rewritten the same
+day by the session that built the working app (items 1 to 14 and 17 in a
+first version).
 Read this top to bottom before touching anything. Everything a fresh session
 needs is here or in files this document names.
 
@@ -84,63 +85,75 @@ app with a basic layer first, then deep dive into orchestration and iterate.
 
 ## 2. Current state
 
-### Done
-- Step 0 audit, delivered and accepted. Findings in section 4.
-- Replit connector, GitHub connector, and both repos verified reachable
-  (see section 6 for the one transient failure).
-- All eight decisions answered by the owner. Locked in section 4.
-- Replit source snapshot saved to `replit_snapshot/` so this repo is
-  self-contained.
-- A0 bootstrap complete and committed: `app.py` rewritten from the snapshot
-  with the eleven edits from the old section 8.2 (now listed in section 3),
-  `utils.py`, `database.py`, `tests/test_utils.py` (20 tests, all passing),
-  `requirements.txt`, `.env.example`, `.replit`, `.streamlit/config.toml`,
-  `README.md`, `pytest.ini`. All six audit bugs closed in code.
-- Item 1 done in code and verified against a local Postgres 16 (see 6.6):
-  Alembic with revisions `0001` (the original eight tables plus the agent
-  seed) and `0002` (vitals `recorded_at`, `source_file_id`),
-  `database.run_migrations()` at startup with stamp-then-upgrade for a
-  pre-Alembic database, `ThreadedConnectionPool` behind `db_cursor()`.
-  Five database tests in `tests/test_database.py` cover fresh upgrade,
-  legacy stamp with row survival, idempotent re-run, cross-user access
-  denial, and the pool under more threads than connections.
+### Done (all on `main`, CI green)
+- Step 0 audit; A0 bootstrap; item 1 (Alembic, pool).
+- Item 2: orphan rule gone. Access model is one family per deployment:
+  every active user sees every patient; roles viewer, editor, admin gate
+  writes; every query scoped by patient_id; leakage test in
+  `tests/test_database.py::test_no_cross_patient_leakage`.
+- Item 3: `extraction.py`, fixed pydantic schemas for prescriptions, lab
+  reports, imaging reports, other; every item has page number, confidence,
+  and the fields the model was unsure about. PDF pages rendered by pymupdf,
+  images normalized, DICOM pixel data rendered with its header as text.
+- Item 4: `documents.py` queues every extracted item as pending; the
+  Documents page shows each item beside its page image; `confirm_item` is
+  the only path into medications or vitals_history.
+- Item 5: originals and page PNGs stay in Postgres (`patient_files.file_data`,
+  `document_pages.image_png`) behind `database.save_document`; every stored
+  value carries `source_file_id`, `source_page`, `extracted_item_id`.
+  Object storage was dropped with Replit; revisit only if the database grows.
+- Item 6: `auth.py`, built-in accounts (bcrypt), first signup is admin,
+  invite codes with role, `audit_log` on every write, admin screens for
+  people and invites. Clerk dropped at the owner's request.
+- Item 7: `api.py` FastAPI over the same service functions, bearer tokens.
+- Items 8, 9, 10, 11: `board.py`. Shared `SpecialistOutput` schema; pharmacist
+  gets deterministic duplicate and multi-prescriber flags from
+  `medications.find_duplicates`; keyword routing with whole-word domains,
+  small-model router as fallback, full review on request; `board_runs` logs
+  calls, tokens, cost; `detect_advice_request` plus output scrubbing;
+  twenty advice prompts in `tests/test_board.py` all declined.
+- Items 12, 13, 14: `appointments.py` (reminders, ICS), `brief.py`
+  (markdown and PDF, English or Urdu labels), per-user language setting
+  applied to board output and briefs.
+- Item 17: `providers.py`. OpenAI implemented; `demo` provider for runs
+  without a key; Anthropic slot documented, not implemented (no key yet).
+- Deployment files: Dockerfile, start.sh, docker-compose.yml, render.yaml,
+  GitHub Actions CI (tests on a Postgres service plus a Docker build).
+- Streamlit UI rewritten as a multipage app (`app.py`). Playwright smoke
+  test `tests/e2e/smoke.py` passes end to end in demo mode; screenshots in
+  `docs/screenshots/`.
 
-### Not verified
-`app.py` has never been launched (Streamlit plus crewai are not installed in
-the dev container). The live Replit database has not been migrated; it still
-runs the snapshot code. See section 8 for the plan the owner must approve
-before the first deploy from this repo.
-
-### Not started
-Items 2 through 17.
+### Not done
+- Deployment itself. Nothing is hosted. The owner connects the GitHub repo
+  to Render (or runs docker compose). See section 8.
+- Anthropic provider (item 17 second half): add `AnthropicProvider` in
+  `providers.py` when the owner adds a key; the owner's model choice is
+  Sonnet for extraction and specialists, Opus coordinator, Haiku router.
+- Items 15 and 16 (MCP server, Expo client).
+- Live data: the Replit database was never exported. If the owner wants it,
+  one `pg_dump` in the Replit shell, then restore into the new database and
+  run the app once (migrations stamp and upgrade it). Otherwise fresh.
+- Urdu in the PDF uses the host's DejaVu font if present; Arabic script
+  shaping is not verified. Markdown and on-screen Urdu are fine.
+- Email or push reminders. Reminders are on-screen when due, plus ICS
+  export to the phone's calendar.
+- The `patient_data_uploads` directory and PWA tags from the Replit app
+  are gone; add-to-home-screen still works through the browser.
 
 ### Git state
-- Repo: `https://github.com/ofarooqkhan/family-medical-board` (public).
-  One branch, `main`. All work goes there. Small commits, pushed often.
-- Local checkout in this container: `/home/user/family-medical-board`.
-- History on `main` up to `53fa39e`: `c198775` snapshot and handoff,
-  `303d4c5` utils and database, `23c7ce0` and `55aff1e` handoff updates,
-  `34001e7` email removal, `aadcfce` repo switch, `53fa39e` single branch.
-- The A0 and item 1 session was given the harness branch
-  `claude/inspiring-galileo-3pdhym` as its push target and could not push to
-  `main` without the owner's say in that session. Those commits are on that
-  branch, which is a fast-forward of `main`. First thing for the next session:
-  `git fetch origin && git checkout main && git merge --ff-only origin/claude/inspiring-galileo-3pdhym && git push -u origin main`,
-  or the owner merges it on GitHub. Then delete the session branch.
-- Retired: `ofarooqkhan/Omer-` (holds the same early commits, stale, do not
-  push there) and the session branch
-  `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` (merged into
-  `main` and deleted at the owner's request for simplicity).
-- Reference clone: `/home/user/medical-board-history`, one commit `206f97f`
-  on `main`. Read only in practice. Byte-identical to the zip the owner
-  uploaded. Stale legacy code. Do not develop here.
-- Decision 8 (section 4) allows a final mirror push of `main` to
-  `medical-board-history` at the very end, after an explicit go from the
-  owner at that time.
-
----
+- Repo `https://github.com/ofarooqkhan/family-medical-board`, branch `main`,
+  all work there. The harness session branch
+  `claude/inspiring-galileo-3pdhym` is a stale pointer and can be deleted.
+- Reference clone of the retired repo: `/home/user/medical-board-history`.
+  Mirror push at the very end only, after a go (decision 4.8).
 
 ## 3. Every file touched
+
+This section is the A0 and item 1 record. For the current layout read
+the module docstrings; each top-level module starts with what it owns.
+Modules: `app.py`, `api.py`, `auth.py`, `database.py`, `documents.py`,
+`extraction.py`, `providers.py`, `demo.py`, `board.py`, `medications.py`,
+`appointments.py`, `brief.py`, `utils.py`, `alembic/versions/0001..0003`.
 
 All paths relative to `/home/user/family-medical-board`.
 
@@ -427,50 +440,47 @@ Phase D after 7 and 6: items 15, 16.
 
 ## 5. Commands
 
-Environment: the A0 session had Python 3.13.16 at `python3` (the audit
-session had 3.11.17; it varies per container, the app targets 3.11 on
-Replit). Use `python3 -m pip`. Recreate `.venv` each session. The cloud
-container ships PostgreSQL 16 server binaries and Docker; see 6.6 for the
-commands that start a throwaway cluster. `DATABASE_URL` is unset here.
+Environment notes: Python 3.13 in the cloud container, 3.11 in the Docker
+image. PostgreSQL 16 binaries and Docker CLI are present but no daemon;
+start a throwaway cluster as in 6.6. Only GitHub's API and PyPI are
+reachable from the container.
 
 ```bash
-# Set up
 cd /home/user/family-medical-board
 python3 -m venv .venv && . .venv/bin/activate
-python3 -m pip install pytest alembic sqlalchemy psycopg2-binary   # tests only
-python3 -m pip install -r requirements.txt                          # full app
+python3 -m pip install -r requirements-dev.txt
 
-# Unit tests (no database needed; database tests skip)
+# Tests without a database (database tests skip)
 python3 -m pytest tests/ -q
-
-# All tests, against a throwaway Postgres (see 6.6). Never the app database.
+# All tests (never point this at the app database; it drops the schema)
 TEST_DATABASE_URL="postgresql://postgres@/fmb_pytest?host=/tmp&port=5433" python3 -m pytest tests/ -q
+
+# Run the app locally in demo mode (no model key needed)
+DATABASE_URL="postgresql://postgres@/fmb_dev?host=/tmp&port=5433" MODEL_PROVIDER=demo \
+  streamlit run app.py --server.port 8501 --server.headless true
+# With a real key: drop MODEL_PROVIDER and set OPENAI_API_KEY
+# API alongside: uvicorn api:app --port 8001
+
+# End-to-end smoke test against the running app (fresh database first)
+CHROMIUM_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome python3 tests/e2e/smoke.py /tmp/shots
 
 # Migrations by hand
 DATABASE_URL=... alembic current
 DATABASE_URL=... alembic upgrade head
+DATABASE_URL=... alembic revision -m "describe change"   # then edit the file
 
-# Syntax check without installing heavy deps
-python3 -m py_compile utils.py database.py app.py
-
-# Run the app locally (needs DATABASE_URL and ANTHROPIC_API_KEY or OPENAI_API_KEY)
-streamlit run app.py --server.port=5000 --server.address=0.0.0.0
+# Local full stack with Docker (on a machine with a daemon)
+docker compose up --build
 
 # Git
-git status
-git add -A
-git commit -m "<message>"       # attribution trailer required, see section 7
-git push -u origin main
-# On network failure retry 4 times with 2s, 4s, 8s, 16s backoff.
-
-# Replit live file read (load tool first)
-# ToolSearch query: select:mcp__Replit__read_app_file
-# then call with replId 0910c133-b692-4c80-b4d8-39d37884f87b and a path
+git push origin main
 ```
 
-On Replit the app runs with the command in `replit_snapshot/.replit`.
-
----
+Environment variables the app reads: `DATABASE_URL`, `OPENAI_API_KEY`
+(or the Replit `AI_INTEGRATIONS_*` pair), `OPENAI_BASE_URL`,
+`MODEL_PROVIDER` (openai, demo, fake), `MODEL_EXTRACTION`,
+`MODEL_SPECIALIST`, `MODEL_COORDINATOR`, `MODEL_ROUTER`,
+`MODEL_TRANSLATE`, `APP_SECRET` (API token signing), `PORT`.
 
 ## 6. Open bugs and verbatim errors
 
@@ -591,42 +601,37 @@ Credentials and ids:
 
 ---
 
-## 8. Next step: land on main, migrate the live database, then item 2
+## 8. Next step: get it hosted, then real-model runs
 
-### 8.1 Land the commits on `main`
-See Git state in section 2. One fast-forward merge, then delete the session
-branch.
+### 8.1 Hosting (owner action, one time)
+Recommended: Render Blueprint. In the Render dashboard, New, Blueprint,
+pick the GitHub repo `ofarooqkhan/family-medical-board`. `render.yaml`
+creates the web service and a Postgres. Enter `OPENAI_API_KEY` when asked
+(or leave it and run in demo mode by setting `MODEL_PROVIDER=demo`). First
+start runs migrations on the empty database. Open the URL, create the
+first account (it becomes admin), add the parents as patients, create
+invite codes for the family under Settings.
+`render.yaml` field names were written from memory because render.com was
+unreachable from the build container; if the Blueprint sync rejects a
+field, the Render UI names it. Alternatives with the same Dockerfile:
+Railway, Fly.io, or `docker compose up` on any machine.
 
-### 8.2 Migration plan for the live Replit database (owner must approve)
-The live app still runs the snapshot code on its own copy of the files. The
-first deploy from this repo runs `database.run_migrations()` at startup,
-which will do exactly this on the live database:
-1. `migration_plan()` finds no `alembic_version` table and an existing
-   `patients` table.
-2. `alembic stamp 0001`: writes one row to a new `alembic_version` table.
-   No table is created or altered.
-3. `alembic upgrade head`: runs `0002`, which is two
-   `ALTER TABLE vitals_history ADD COLUMN IF NOT EXISTS` statements.
-   No rows are touched. Every later start finds `0002` and does nothing.
-This was exercised on a copy of the pre-Alembic schema with rows in it
-(`tests/test_database.py::test_legacy_database_is_stamped_then_upgraded_and_keeps_rows`).
-Before deploying: take a Replit database backup (Database pane, or
-`pg_dump "$DATABASE_URL" > backup.sql` in the Replit shell), then push this
-repo's files to the Replit workspace, add `alembic`, `sqlalchemy` to its
-dependencies (`uv add alembic sqlalchemy` or let `pyproject.toml` be
-regenerated from `requirements.txt`), run once, and check
-`alembic current` prints `0002`. Show this plan to the owner and get a yes
-before touching the live database. Not done in any session so far.
+If the owner wants the session to deploy and verify directly, allow
+`api.render.com` in the cloud environment's network settings and provide a
+Render API key as an environment secret.
 
-### 8.3 Item 2
-Remove the orphan rule in `_patient_visible_clause()` and
-`get_all_patients_for_user_or_orphans`, delete
-`migrate_orphan_patients_to_user` and its two call sites in
-`render_login_page`, and extend `tests/test_database.py` with the
-cross-patient leakage test (two users, two patients each, every read
-function returns only the caller's rows, every write on the other user's
-patient raises). Backfill on the live database: the owner's existing
-patient gets `user_id` set to the owner's user row; add patient 2 through
-the UI. That backfill is one UPDATE; show it before running it. Write it as
-revision `0003` only if it must run everywhere; otherwise it is a one-off
-the owner runs in the Replit shell.
+### 8.2 First real-model session
+With `OPENAI_API_KEY` set: upload three real documents (a prescription, a
+lab report, an imaging report), check the extraction quality, adjust the
+prompts in `extraction.py` if fields are missed, then run a full board
+review and read every specialist's output for any advice phrasing.
+`tests/test_board.py` has a live test slot: add one marked to skip without
+a key that sends the twenty advice prompts to the real model and asserts
+`declined_advice_request`.
+
+### 8.3 Then
+1. Anthropic provider when the key arrives (section 2).
+2. Replit data export if wanted (section 2).
+3. Items 15 and 16.
+4. Orchestration deep dive per 4.10: routing quality, memory of past
+   findings, per-specialist models, cost caps per run.
