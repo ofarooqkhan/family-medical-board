@@ -729,9 +729,9 @@ def main():
         return
 
     try:
-        db.init_database()
+        db.run_migrations()
     except Exception as e:
-        st.error(f"Database initialization failed: {e}")
+        st.error(f"Database migration failed: {e}")
         return
 
     api_key = get_api_key()
