@@ -1,9 +1,10 @@
-"""Database tests. Run only when TEST_DATABASE_URL points at a throwaway Postgres.
+"""Database and auth tests. Run only when TEST_DATABASE_URL points at a throwaway Postgres.
 
 Every test starts from an empty public schema. Nothing here touches the
 DATABASE_URL the app uses.
 """
 import os
+import threading
 
 import psycopg2
 import pytest
@@ -12,8 +13,8 @@ TEST_URL = os.environ.get("TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.skipif(not TEST_URL, reason="TEST_DATABASE_URL not set")
 
-# The eight tables as the pre-Alembic Replit app created them, without the
-# two columns revision 0002 adds. Used to simulate the live database.
+# The eight tables as the pre-Alembic Replit app created them. Used to simulate
+# the live database that existed before this repo.
 LEGACY_DDL = """
 CREATE TABLE users (id VARCHAR(255) PRIMARY KEY, email VARCHAR(255), first_name VARCHAR(255),
   last_name VARCHAR(255), profile_image_url TEXT,
@@ -43,12 +44,17 @@ CREATE TABLE chat_history (id SERIAL PRIMARY KEY, patient_id INTEGER REFERENCES 
   conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
   timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, role VARCHAR(50) NOT NULL, content TEXT NOT NULL,
   addressed_to VARCHAR(100), responding_doctor VARCHAR(100), metadata JSONB);
+INSERT INTO doctor_agents (agent_type, display_name, role, goal, backstory)
+  VALUES ('neurologist', 'Stroke Neurologist', 'Stroke Neurologist', 'adjust medications', 'old prompt');
 """
 
 EXPECTED_TABLES = {
-    "users", "patients", "conversations", "patient_files", "vitals_history",
-    "doctor_agents", "doctor_memory", "chat_history", "alembic_version",
+    "users", "patients", "conversations", "patient_files", "vitals_history", "doctor_agents", "doctor_memory",
+    "chat_history", "alembic_version", "invites", "audit_log", "document_pages", "extracted_items", "medications",
+    "medication_changes", "appointments", "board_runs",
 }
+
+HEAD = "0003"
 
 
 def _raw():
@@ -64,26 +70,24 @@ def _reset_schema():
     conn.close()
 
 
-def _columns(table):
+def _query(sql, params=None):
     conn = _raw()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=%s "
-        "ORDER BY ordinal_position", (table,))
-    cols = [r[0] for r in cur.fetchall()]
+    cur.execute(sql, params or ())
+    rows = cur.fetchall()
     cur.close()
     conn.close()
-    return cols
+    return rows
+
+
+def _columns(table):
+    return [r[0] for r in _query(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=%s "
+        "ORDER BY ordinal_position", (table,))]
 
 
 def _tables():
-    conn = _raw()
-    cur = conn.cursor()
-    cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
-    names = {r[0] for r in cur.fetchall()}
-    cur.close()
-    conn.close()
-    return names
+    return {r[0] for r in _query("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")}
 
 
 @pytest.fixture
@@ -96,13 +100,35 @@ def db(monkeypatch):
     database.close_pool()
 
 
+@pytest.fixture
+def migrated(db):
+    db.run_migrations()
+    return db
+
+
+@pytest.fixture
+def accounts(migrated):
+    """An admin, an editor, and a viewer created through the real signup flow."""
+    import auth
+    admin = auth.signup("admin@example.com", "correct horse battery", "Admin")
+    inv_e = auth.create_invite(admin, "editor")
+    editor = auth.signup("editor@example.com", "correct horse battery", "Editor", inv_e["code"])
+    inv_v = auth.create_invite(admin, "viewer")
+    viewer = auth.signup("viewer@example.com", "correct horse battery", "Viewer", inv_v["code"])
+    return {"admin": admin, "editor": editor, "viewer": viewer}
+
+
+# Migrations
+
 def test_fresh_database_reaches_head(db):
     plan = db.run_migrations()
     assert plan["will_stamp"] is None
     assert _tables() == EXPECTED_TABLES
-    assert _columns("vitals_history")[-2:] == ["recorded_at", "source_file_id"]
-    assert db.migration_plan()["current_revision"] == "0002"
-    assert len(db.get_doctor_agents(active_only=False)) == 6
+    assert db.migration_plan()["current_revision"] == HEAD
+    agents = db.get_doctor_agents(active_only=False)
+    assert len(agents) == 15
+    assert all(a["system_prompt"] and "never give medical advice" in a["system_prompt"].lower() for a in agents)
+    assert {a["agent_type"] for a in agents if not a["is_active"]} == {"pulmonologist", "geriatrician", "geriatric_psychiatry"}
 
 
 def test_legacy_database_is_stamped_then_upgraded_and_keeps_rows(db):
@@ -119,58 +145,189 @@ def test_legacy_database_is_stamped_then_upgraded_and_keeps_rows(db):
     assert "recorded_at" not in _columns("vitals_history")
     plan = db.run_migrations()
     assert plan["will_stamp"] == "0001"
-    assert "recorded_at" in _columns("vitals_history")
-    assert "source_file_id" in _columns("vitals_history")
-    assert db.migration_plan()["current_revision"] == "0002"
+    assert {"recorded_at", "source_file_id", "source_page", "reference_range"} <= set(_columns("vitals_history"))
+    assert db.migration_plan()["current_revision"] == HEAD
+    assert _query("SELECT count(*) FROM users")[0][0] == 1
+    assert _query("SELECT count(*) FROM patients")[0][0] == 2
+    assert _query("SELECT count(*) FROM vitals_history")[0][0] == 2
+    # The old advice-giving prompt was replaced, the row kept.
+    goal, prompt = _query("SELECT goal, system_prompt FROM doctor_agents WHERE agent_type='neurologist'")[0]
+    assert "adjust" not in goal.lower()
+    assert "never give medical advice" in prompt.lower()
 
-    with db.db_cursor() as c:
-        c.execute("SELECT (SELECT count(*) FROM users) u, (SELECT count(*) FROM patients) p, "
-                  "(SELECT count(*) FROM vitals_history) v")
-        row = c.fetchone()
-    assert (row["u"], row["p"], row["v"]) == (1, 2, 2)
 
-
-def test_second_run_is_a_no_op(db):
-    db.run_migrations()
-    pid = db.create_patient_for_user(db.get_or_create_user("u1")["id"], "Parent One")
-    db.save_vital_reading(pid, "u1", "glucose", 100, "mg/dL")
-    before = db.migration_plan()
-    plan = db.run_migrations()
+def test_second_run_is_a_no_op(migrated):
+    before = migrated.migration_plan()
+    plan = migrated.run_migrations()
     assert plan["will_stamp"] is None
-    assert db.migration_plan() == before
-    assert len(db.get_vitals_history(pid, "u1")) == 1
+    assert migrated.migration_plan() == before
 
 
-def test_owned_patient_is_hidden_from_other_user(db):
-    db.run_migrations()
-    db.get_or_create_user("u1")
-    db.get_or_create_user("u2")
-    pid = db.create_patient_for_user("u1", "Parent One")
-    assert db.get_patient(pid, "u1") is not None
-    assert db.get_patient(pid, "u2") is None
+def test_downgrade_and_upgrade_round_trip(migrated):
+    from alembic import command
+    cfg = migrated._alembic_config()
+    command.downgrade(cfg, "0002")
+    migrated.close_pool()
+    assert "medications" not in _tables()
+    assert "role" not in _columns("users")
+    command.upgrade(cfg, "head")
+    migrated.close_pool()
+    assert _tables() == EXPECTED_TABLES
+
+
+# Auth
+
+def test_first_signup_is_admin_then_invites_are_required(migrated):
+    import auth
+    assert auth.is_first_user()
+    admin = auth.signup("a@example.com", "correct horse battery", "A")
+    assert admin["role"] == "admin"
+    assert not auth.is_first_user()
+    with pytest.raises(auth.AuthError):
+        auth.signup("b@example.com", "correct horse battery", "B")
+    with pytest.raises(auth.AuthError):
+        auth.signup("b@example.com", "correct horse battery", "B", "not-a-code")
+    inv = auth.create_invite(admin, "editor")
+    b = auth.signup("b@example.com", "correct horse battery", "B", inv["code"])
+    assert b["role"] == "editor"
+    with pytest.raises(auth.AuthError):
+        auth.signup("c@example.com", "correct horse battery", "C", inv["code"])  # already used
+
+
+def test_login_rejects_wrong_password_and_disabled_accounts(accounts):
+    import auth
+    assert auth.login("Admin@Example.com", "correct horse battery")["id"] == accounts["admin"]["id"]
+    with pytest.raises(auth.AuthError):
+        auth.login("admin@example.com", "wrong password here")
+    with pytest.raises(auth.AuthError):
+        auth.login("nobody@example.com", "correct horse battery")
+    import database
+    database.set_user_active(accounts["admin"], accounts["viewer"]["id"], False)
+    with pytest.raises(auth.AuthError):
+        auth.login("viewer@example.com", "correct horse battery")
+
+
+def test_signup_validation(migrated):
+    import auth
+    with pytest.raises(auth.AuthError):
+        auth.signup("not-an-email", "correct horse battery", "A")
+    with pytest.raises(auth.AuthError):
+        auth.signup("a@example.com", "short", "A")
+    with pytest.raises(auth.AuthError):
+        auth.signup("a@example.com", "correct horse battery", "  ")
+
+
+def test_password_change_and_admin_reset(accounts):
+    import auth
+    auth.change_password(accounts["editor"], "correct horse battery", "a brand new password")
+    with pytest.raises(auth.AuthError):
+        auth.login("editor@example.com", "correct horse battery")
+    auth.login("editor@example.com", "a brand new password")
+    temp = auth.reset_password(accounts["admin"], accounts["editor"]["id"])
+    auth.login("editor@example.com", temp)
     with pytest.raises(PermissionError):
-        db.update_patient(pid, "u2", name="x")
-    with pytest.raises(PermissionError):
-        db.save_vital_reading(pid, "u2", "glucose", 1, "mg/dL")
-    cid = db.create_conversation("u1", pid, "t")
-    with pytest.raises(PermissionError):
-        db.save_chat_message_to_conversation(pid, cid, "u2", "user", "hi")
-    assert db.get_conversation_history(cid, "u2") == []
+        auth.reset_password(accounts["editor"], accounts["admin"]["id"])
 
 
-def test_pool_serves_more_threads_than_connections(db):
-    import threading
-    db.run_migrations()
+# Roles and audit
+
+def test_roles_gate_writes(accounts):
+    db = __import__("database")
+    pid = db.create_patient(accounts["editor"], "Parent One", age=80)
+    with pytest.raises(PermissionError):
+        db.create_patient(accounts["viewer"], "Parent Two")
+    with pytest.raises(PermissionError):
+        db.update_patient(pid, accounts["viewer"], age=81)
+    with pytest.raises(PermissionError):
+        db.save_vital_reading(pid, accounts["viewer"], "glucose", 100, "mg/dL")
+    with pytest.raises(PermissionError):
+        db.delete_patient(pid, accounts["editor"])  # admin only
+    with pytest.raises(PermissionError):
+        db.update_doctor_agent(accounts["editor"], "neurologist", is_active=False)
+    # Viewers can read everything.
+    assert db.get_patient(pid, accounts["viewer"])["name"] == "Parent One"
+    assert len(db.list_patients(accounts["viewer"])) == 1
+    db.update_doctor_agent(accounts["admin"], "neurologist", is_active=False)
+    assert "neurologist" not in {a["agent_type"] for a in db.get_doctor_agents()}
+
+
+def test_every_write_is_audited(accounts):
+    db = __import__("database")
+    pid = db.create_patient(accounts["editor"], "Parent One")
+    db.update_patient(pid, accounts["editor"], age=79)
+    db.save_vital_reading(pid, accounts["editor"], "glucose", 100, "mg/dL")
+    fid = db.save_document(pid, accounts["editor"], "lab.png", "image/png", b"\x89PNG", "lab_report",
+                           pages=[{"page_number": 1, "image_png": b"\x89PNG", "width": 1, "height": 1}])
+    actions = [r["action"] for r in db.get_audit_log(pid)]
+    assert {"patient.create", "patient.update", "vital.create", "document.upload"} <= set(actions)
+    assert all(r["user_id"] == accounts["editor"]["id"] for r in db.get_audit_log(pid) if r["action"] != "user.signup")
+    assert db.get_document(fid, pid, accounts["viewer"])["sha256"]
+
+
+def test_no_cross_patient_leakage(accounts):
+    """Everything written for patient A must be invisible through patient B's id."""
+    db = __import__("database")
+    ed = accounts["editor"]
+    a = db.create_patient(ed, "Parent A")
+    b = db.create_patient(ed, "Parent B")
+    db.save_vital_reading(a, ed, "glucose", 111, "mg/dL")
+    fa = db.save_document(a, ed, "a.png", "image/png", b"A", "lab_report",
+                          pages=[{"page_number": 1, "image_png": b"A", "width": 1, "height": 1}])
+    db.add_extracted_items(a, fa, ed, [{"page_number": 1, "item_type": "lab_value", "payload": {"test": "x"}, "confidence": 0.9}])
+    db.save_doctor_memory(a, ed, "neurologist", "finding", "only for A")
+    conv = db.create_conversation(ed, a, "A chat")
+    db.save_chat_message(a, conv, ed, "user", "hello A")
+
+    assert db.get_vitals_history(b, ed) == []
+    assert db.get_latest_vitals(b, ed) == []
+    assert db.list_documents(b, ed) == []
+    assert db.get_document(fa, b, ed) is None
+    assert db.get_document_pages(fa, b, ed) == []
+    assert db.list_extracted_items(b, ed) == []
+    assert db.get_doctor_memories(b, ed) == []
+    assert db.get_user_conversations(ed, b) == []
+    assert db.get_audit_log(b) == [r for r in db.get_audit_log(b) if r["patient_id"] == b]
+    with pytest.raises(PermissionError):
+        db.save_chat_message(b, conv, ed, "user", "wrong patient")
+    # And A's data is all there.
+    assert len(db.get_vitals_history(a, ed)) == 1
+    assert len(db.list_documents(a, ed)) == 1
+    assert len(db.list_extracted_items(a, ed, status="pending")) == 1
+
+
+def test_extracted_items_review_flow(accounts):
+    db = __import__("database")
+    ed = accounts["editor"]
+    pid = db.create_patient(ed, "Parent One")
+    fid = db.save_document(pid, ed, "rx.pdf", "application/pdf", b"%PDF", "prescription",
+                           pages=[{"page_number": 1, "image_png": b"P", "width": 1, "height": 1},
+                                  {"page_number": 2, "image_png": b"P", "width": 1, "height": 1}])
+    ids = db.add_extracted_items(pid, fid, ed, [
+        {"page_number": 1, "item_type": "medication", "payload": {"name": "Metformin"}, "confidence": 0.95},
+        {"page_number": 2, "item_type": "medication", "payload": {"name": "??"}, "confidence": 0.3},
+    ])
+    db.set_extracted_item_status(ids[0], pid, ed, "confirmed", payload={"name": "Metformin", "dose": "500 mg"})
+    db.set_extracted_item_status(ids[1], pid, ed, "rejected")
+    items = {i["id"]: i for i in db.list_extracted_items(pid, ed, file_id=fid)}
+    assert items[ids[0]]["status"] == "confirmed" and items[ids[0]]["payload"]["dose"] == "500 mg"
+    assert items[ids[1]]["status"] == "rejected"
+    assert items[ids[0]]["reviewed_by"] == ed["id"]
+    assert db.list_extracted_items(pid, ed, status="pending") == []
+    pages = db.get_document_pages(fid, pid, ed, with_images=False)
+    assert [p["page_number"] for p in pages] == [1, 2]
+
+
+def test_pool_serves_more_threads_than_connections(migrated):
     errors = []
 
     def work():
         try:
             for _ in range(10):
-                db.get_doctor_agents()
+                migrated.get_doctor_agents()
         except Exception as e:
             errors.append(repr(e))
 
-    threads = [threading.Thread(target=work) for _ in range(db.POOL_MAX * 3)]
+    threads = [threading.Thread(target=work) for _ in range(migrated.POOL_MAX * 3)]
     for t in threads:
         t.start()
     for t in threads:

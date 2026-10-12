@@ -1,21 +1,21 @@
-"""Postgres access layer.
+"""Postgres access layer: pool, migrations, access checks, audit, and the core
+tables (users, patients, documents, vitals, agents, conversations).
 
-Every read or write that touches patient data takes a user_id and checks that
-the user may see that patient. Functions raise PermissionError when the check
-fails so callers cannot silently operate on someone else's record.
+Access model: this deployment serves one family. Every active user can see
+every patient. Roles decide who may write:
+  viewer  read only
+  editor  change patient records
+  admin   editor plus user, invite, and agent management
+Every query is scoped by patient_id. Writes raise PermissionError when the
+role is too low, and every write adds an audit_log row.
 
-Connections come from a process-wide psycopg2 ThreadedConnectionPool.
-Streamlit runs each browser session's script in its own thread, so the pool
-must be the threaded variant. Use db_cursor() for every query.
-
-Schema is managed by Alembic (alembic/versions). run_migrations() brings a
-database to the current revision at startup.
-
-A0 note: orphan patients (user_id IS NULL) are still visible to any signed-in
-user. Removing that and adding the leakage test is item 2.
+Connections come from a process-wide psycopg2 ThreadedConnectionPool
+(Streamlit runs each session in its own thread). Use db_cursor() for every
+query. Schema is managed by Alembic; run_migrations() runs at startup.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 from contextlib import contextmanager
@@ -27,18 +27,15 @@ from psycopg2.extras import RealDictCursor
 
 from utils import json_dumps_safe
 
-SPECIALIST_ORDER = ["neurologist", "cardiologist", "nephrologist", "endocrinologist", "radiologist"]
+ROLE_RANK = {"viewer": 1, "editor": 2, "admin": 3}
 
 POOL_MIN = 1
 POOL_MAX = 8
-# Seconds a caller waits for a free connection before giving up.
 POOL_WAIT_SECONDS = 30
 
 _pool: pg_pool.ThreadedConnectionPool | None = None
 _pool_url: str | None = None
 _pool_lock = threading.Lock()
-# psycopg2's pool raises PoolError as soon as maxconn is reached. This
-# semaphore makes callers wait for a free slot instead.
 _slots = threading.BoundedSemaphore(POOL_MAX)
 
 
@@ -62,7 +59,6 @@ def _get_pool() -> pg_pool.ThreadedConnectionPool:
 
 
 def close_pool() -> None:
-    """Close every pooled connection. Used by tests and at shutdown."""
     global _pool
     with _pool_lock:
         if _pool is not None and not _pool.closed:
@@ -72,12 +68,7 @@ def close_pool() -> None:
 
 @contextmanager
 def db_cursor(commit: bool = False) -> Iterator[Any]:
-    """Yield a RealDictCursor on a pooled connection.
-
-    Commits on clean exit when commit=True, rolls back on any exception, and
-    always returns the connection to the pool. A connection that failed at
-    the socket level is discarded so the next call gets a fresh one.
-    """
+    """Yield a RealDictCursor on a pooled connection; commit or roll back; return it."""
     if not _slots.acquire(timeout=POOL_WAIT_SECONDS):
         raise RuntimeError(f"no database connection became free within {POOL_WAIT_SECONDS}s")
     try:
@@ -115,11 +106,6 @@ def db_cursor(commit: bool = False) -> Iterator[Any]:
         _slots.release()
 
 
-def get_db_connection():
-    """Compatibility shim. Prefer db_cursor(). Caller must close() the connection."""
-    return psycopg2.connect(database_url(), cursor_factory=RealDictCursor)
-
-
 # ---------------------------------------------------------------------------
 # Schema: Alembic
 # ---------------------------------------------------------------------------
@@ -133,13 +119,11 @@ def _alembic_config():
 
     cfg = Config()
     cfg.set_main_option("script_location", os.path.join(_REPO_DIR, "alembic"))
-    # ConfigParser interpolation: a literal percent sign must be doubled.
     cfg.set_main_option("sqlalchemy.url", database_url().replace("%", "%%"))
     return cfg
 
 
 def migration_plan() -> dict[str, Any]:
-    """Describe what run_migrations() will do, without doing it."""
     with db_cursor() as cur:
         cur.execute("SELECT to_regclass('public.alembic_version') AS v, to_regclass('public.patients') AS p")
         row = cur.fetchone()
@@ -161,13 +145,7 @@ def migration_plan() -> dict[str, Any]:
 
 
 def run_migrations() -> dict[str, Any]:
-    """Bring the database to the current Alembic head.
-
-    A database created before Alembic (tables exist, no alembic_version) is
-    stamped at PRE_ALEMBIC_REVISION first so revision 0001 is not re-run
-    against existing tables. Later revisions then apply normally.
-    Safe to call on every startup; a database already at head is a no-op.
-    """
+    """Bring the database to head. A pre-Alembic database is stamped at 0001 first."""
     from alembic import command
 
     plan = migration_plan()
@@ -180,394 +158,496 @@ def run_migrations() -> dict[str, Any]:
 
 
 def init_database() -> None:
-    """Kept for callers that still use the old name."""
     run_migrations()
 
 
 # ---------------------------------------------------------------------------
-# Access control helpers
+# Access checks and audit
 # ---------------------------------------------------------------------------
 
-def _patient_visible_clause() -> str:
-    # Orphan rule kept for A0. Item 2 removes "OR p.user_id IS NULL".
-    return "(p.user_id = %s OR p.user_id IS NULL)"
+def require_role(user: dict | None, role: str) -> None:
+    """Raise PermissionError unless user is active and holds at least `role`."""
+    if not user or not user.get("id"):
+        raise PermissionError("sign in required")
+    if user.get("is_active") is False:
+        raise PermissionError("account is disabled")
+    if ROLE_RANK.get(user.get("role", "viewer"), 0) < ROLE_RANK[role]:
+        raise PermissionError(f"{role} role required")
 
 
-def _assert_patient_access(cur, patient_id: int, user_id: str) -> None:
-    if not user_id:
-        raise PermissionError("user_id is required")
+def _assert_patient(cur, patient_id: int) -> dict:
+    cur.execute("SELECT * FROM patients WHERE id = %s", (patient_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise PermissionError(f"no patient {patient_id}")
+    return row
+
+
+def audit(cur, user: dict | None, patient_id: int | None, action: str, entity: str | None = None,
+          entity_id: int | None = None, details: Any = None) -> None:
     cur.execute(
-        f'SELECT 1 FROM patients p WHERE p.id = %s AND {_patient_visible_clause()}',
-        (patient_id, user_id),
+        "INSERT INTO audit_log (user_id, patient_id, action, entity, entity_id, details) VALUES (%s, %s, %s, %s, %s, %s)",
+        ((user or {}).get("id"), patient_id, action, entity, entity_id, json_dumps_safe(details)),
     )
-    if cur.fetchone() is None:
-        raise PermissionError(f"user {user_id} may not access patient {patient_id}")
 
 
-def _assert_conversation_access(cur, conversation_id: int, user_id: str) -> dict:
-    if not user_id:
-        raise PermissionError("user_id is required")
-    cur.execute('SELECT * FROM conversations WHERE id = %s AND user_id = %s', (conversation_id, user_id))
-    conv = cur.fetchone()
-    if conv is None:
-        raise PermissionError(f"user {user_id} may not access conversation {conversation_id}")
-    return conv
-
-
-def verify_patient_access(patient_id: int, user_id: str) -> bool:
-    if not user_id:
-        return False
+def get_audit_log(patient_id: int | None = None, limit: int = 200):
     with db_cursor() as cur:
-        try:
-            _assert_patient_access(cur, patient_id, user_id)
-            return True
-        except PermissionError:
-            return False
+        if patient_id is None:
+            cur.execute("""SELECT a.*, u.display_name FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
+                           ORDER BY a.created_at DESC LIMIT %s""", (limit,))
+        else:
+            cur.execute("""SELECT a.*, u.display_name FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
+                           WHERE a.patient_id = %s ORDER BY a.created_at DESC LIMIT %s""", (patient_id, limit))
+        return cur.fetchall()
 
 
 # ---------------------------------------------------------------------------
-# Users
+# Users (account creation and passwords live in auth.py)
 # ---------------------------------------------------------------------------
 
-def get_or_create_user(user_id, email=None, first_name=None, last_name=None, profile_image_url=None):
-    with db_cursor(commit=True) as cur:
-        cur.execute('SELECT * FROM users WHERE id = %s', (user_id,))
-        user = cur.fetchone()
-        if not user:
-            clean_email = email if email and email.strip() else None
-            cur.execute('''
-                INSERT INTO users (id, email, first_name, last_name, profile_image_url)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING *
-            ''', (user_id, clean_email, first_name, last_name, profile_image_url))
-            user = cur.fetchone()
-        return user
-
-
-def get_user(user_id):
+def get_user(user_id: str):
     with db_cursor() as cur:
-        cur.execute('SELECT * FROM users WHERE id = %s', (user_id,))
+        cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
         return cur.fetchone()
 
 
-def migrate_orphan_patients_to_user(user_id):
-    """Assign patients with no owner to this user. Removed in item 2."""
+def get_user_by_email(email: str):
+    with db_cursor() as cur:
+        cur.execute("SELECT * FROM users WHERE lower(email) = lower(%s)", (email.strip(),))
+        return cur.fetchone()
+
+
+def list_users():
+    with db_cursor() as cur:
+        cur.execute("SELECT id, email, display_name, role, language, is_active, created_at, last_login_at FROM users ORDER BY created_at")
+        return cur.fetchall()
+
+
+def count_users() -> int:
+    with db_cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM users")
+        return cur.fetchone()["n"]
+
+
+def update_user_settings(user: dict, *, display_name: str | None = None, language: str | None = None) -> None:
+    require_role(user, "viewer")
     with db_cursor(commit=True) as cur:
-        cur.execute('UPDATE patients SET user_id = %s WHERE user_id IS NULL', (user_id,))
-        return cur.rowcount
+        if display_name is not None:
+            cur.execute("UPDATE users SET display_name = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (display_name, user["id"]))
+        if language is not None:
+            cur.execute("UPDATE users SET language = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (language, user["id"]))
+        audit(cur, user, None, "user.settings", "user", None, {"display_name": display_name, "language": language})
+
+
+def set_user_role(admin: dict, target_user_id: str, role: str) -> None:
+    require_role(admin, "admin")
+    if role not in ROLE_RANK:
+        raise ValueError(f"unknown role {role}")
+    with db_cursor(commit=True) as cur:
+        cur.execute("UPDATE users SET role = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (role, target_user_id))
+        audit(cur, admin, None, "user.role", "user", None, {"user_id": target_user_id, "role": role})
+
+
+def set_user_active(admin: dict, target_user_id: str, is_active: bool) -> None:
+    require_role(admin, "admin")
+    if target_user_id == admin["id"] and not is_active:
+        raise ValueError("you cannot disable your own account")
+    with db_cursor(commit=True) as cur:
+        cur.execute("UPDATE users SET is_active = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (is_active, target_user_id))
+        audit(cur, admin, None, "user.active", "user", None, {"user_id": target_user_id, "is_active": is_active})
 
 
 # ---------------------------------------------------------------------------
 # Patients
 # ---------------------------------------------------------------------------
 
-def get_all_patients_for_user_or_orphans(user_id):
+PATIENT_FIELDS = ("name", "age", "date_of_birth", "sex", "weight_lbs", "medications", "allergies",
+                  "medical_history", "stroke_date", "primary_doctor", "notes")
+
+
+def list_patients(user: dict, include_archived: bool = False):
+    require_role(user, "viewer")
     with db_cursor() as cur:
-        cur.execute('SELECT * FROM patients WHERE user_id = %s OR user_id IS NULL ORDER BY updated_at DESC', (user_id,))
+        if include_archived:
+            cur.execute("SELECT * FROM patients ORDER BY name")
+        else:
+            cur.execute("SELECT * FROM patients WHERE NOT is_archived ORDER BY name")
         return cur.fetchall()
 
 
-def get_user_patients(user_id):
+def get_patient(patient_id: int, user: dict):
+    require_role(user, "viewer")
     with db_cursor() as cur:
-        cur.execute('SELECT * FROM patients WHERE user_id = %s ORDER BY updated_at DESC', (user_id,))
-        return cur.fetchall()
-
-
-def get_patient(patient_id, user_id):
-    with db_cursor() as cur:
-        cur.execute(f'SELECT * FROM patients p WHERE p.id = %s AND {_patient_visible_clause()}', (patient_id, user_id))
+        cur.execute("SELECT * FROM patients WHERE id = %s", (patient_id,))
         return cur.fetchone()
 
 
-def create_patient_for_user(user_id, name, age=None, weight_lbs=None, medications=None,
-                            allergies=None, medical_history=None, stroke_date=None):
+def create_patient(user: dict, name: str, **fields) -> int:
+    require_role(user, "editor")
+    cols = ["user_id", "name"]
+    vals: list[Any] = [user["id"], name]
+    for k, v in fields.items():
+        if k in PATIENT_FIELDS and k != "name":
+            cols.append(k)
+            vals.append(v)
     with db_cursor(commit=True) as cur:
-        cur.execute('''
-            INSERT INTO patients (user_id, name, age, weight_lbs, medications, allergies, medical_history, stroke_date)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-        ''', (user_id, name, age, weight_lbs, medications, allergies, medical_history, stroke_date))
-        return cur.fetchone()['id']
+        cur.execute(f"INSERT INTO patients ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(vals))}) RETURNING id", vals)
+        pid = cur.fetchone()["id"]
+        audit(cur, user, pid, "patient.create", "patient", pid, {"name": name})
+        return pid
 
 
-_PATIENT_EDITABLE = {'name', 'age', 'weight_lbs', 'medications', 'allergies', 'medical_history', 'stroke_date'}
-
-
-def update_patient(patient_id, user_id, **kwargs):
+def update_patient(patient_id: int, user: dict, **fields) -> None:
+    require_role(user, "editor")
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in PATIENT_FIELDS:
+            sets.append(f"{k} = %s")
+            vals.append(v)
+    if not sets:
+        return
     with db_cursor(commit=True) as cur:
-        _assert_patient_access(cur, patient_id, user_id)
-        set_clauses = []
-        values: list[Any] = []
-        for key, value in kwargs.items():
-            if key in _PATIENT_EDITABLE:
-                set_clauses.append(f"{key} = %s")
-                values.append(value)
-        if set_clauses:
-            set_clauses.append("updated_at = CURRENT_TIMESTAMP")
-            values.append(patient_id)
-            cur.execute(f"UPDATE patients SET {', '.join(set_clauses)} WHERE id = %s", values)
+        _assert_patient(cur, patient_id)
+        vals.append(patient_id)
+        cur.execute(f"UPDATE patients SET {', '.join(sets)}, updated_at = CURRENT_TIMESTAMP WHERE id = %s", vals)
+        audit(cur, user, patient_id, "patient.update", "patient", patient_id, {k: str(v) for k, v in fields.items() if k in PATIENT_FIELDS})
 
 
-def delete_patient(patient_id, user_id):
+def archive_patient(patient_id: int, user: dict, archived: bool = True) -> None:
+    require_role(user, "admin")
     with db_cursor(commit=True) as cur:
-        _assert_patient_access(cur, patient_id, user_id)
-        cur.execute('DELETE FROM patients WHERE id = %s', (patient_id,))
+        _assert_patient(cur, patient_id)
+        cur.execute("UPDATE patients SET is_archived = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (archived, patient_id))
+        audit(cur, user, patient_id, "patient.archive" if archived else "patient.unarchive", "patient", patient_id)
+
+
+def delete_patient(patient_id: int, user: dict) -> None:
+    require_role(user, "admin")
+    with db_cursor(commit=True) as cur:
+        row = _assert_patient(cur, patient_id)
+        audit(cur, user, None, "patient.delete", "patient", patient_id, {"name": row["name"]})
+        cur.execute("DELETE FROM patients WHERE id = %s", (patient_id,))
 
 
 # ---------------------------------------------------------------------------
-# Files
+# Documents (patient_files) and pages
 # ---------------------------------------------------------------------------
 
-def save_patient_file(patient_id, user_id, filename, file_type, file_data, extracted_text=None, extracted_values=None):
+def save_document(patient_id: int, user: dict, filename: str, mime_type: str, data: bytes,
+                  document_kind: str | None = None, pages: list[dict] | None = None,
+                  extracted_text: str | None = None) -> int:
+    """Store a file and its rendered pages. pages: [{page_number, image_png, width, height, text}]."""
+    require_role(user, "editor")
+    digest = hashlib.sha256(data).hexdigest()
     with db_cursor(commit=True) as cur:
-        _assert_patient_access(cur, patient_id, user_id)
-        cur.execute('''
-            INSERT INTO patient_files (patient_id, filename, file_type, file_data, extracted_text, extracted_values)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id
-        ''', (patient_id, filename, file_type, psycopg2.Binary(file_data), extracted_text,
-              json_dumps_safe(extracted_values)))
-        return cur.fetchone()['id']
+        _assert_patient(cur, patient_id)
+        cur.execute("""
+            INSERT INTO patient_files (patient_id, filename, file_type, file_data, extracted_text, mime_type, sha256,
+                                       page_count, uploaded_by, document_kind, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'uploaded') RETURNING id
+        """, (patient_id, filename, document_kind, psycopg2.Binary(data), extracted_text, mime_type, digest,
+              len(pages or []), user["id"], document_kind))
+        file_id = cur.fetchone()["id"]
+        for p in pages or []:
+            cur.execute("""
+                INSERT INTO document_pages (file_id, page_number, image_png, width, height, text)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (file_id, p["page_number"], psycopg2.Binary(p["image_png"]) if p.get("image_png") else None,
+                  p.get("width"), p.get("height"), p.get("text")))
+        audit(cur, user, patient_id, "document.upload", "document", file_id, {"filename": filename, "pages": len(pages or [])})
+        return file_id
 
 
-def get_patient_files(patient_id, user_id):
+def list_documents(patient_id: int, user: dict):
+    require_role(user, "viewer")
     with db_cursor() as cur:
-        cur.execute(f'''
-            SELECT pf.id, pf.filename, pf.file_type, pf.extracted_text, pf.extracted_values, pf.uploaded_at
-            FROM patient_files pf
-            JOIN patients p ON pf.patient_id = p.id
-            WHERE pf.patient_id = %s AND {_patient_visible_clause()}
-            ORDER BY pf.uploaded_at DESC
-        ''', (patient_id, user_id))
+        cur.execute("""
+            SELECT id, patient_id, filename, file_type, mime_type, page_count, document_kind, document_date, status,
+                   extraction_model, extraction_error, uploaded_by, uploaded_at
+            FROM patient_files WHERE patient_id = %s ORDER BY uploaded_at DESC
+        """, (patient_id,))
         return cur.fetchall()
 
 
-def get_file_data(file_id, user_id):
+def get_document(file_id: int, patient_id: int, user: dict, with_data: bool = False):
+    require_role(user, "viewer")
+    cols = "*" if with_data else ("id, patient_id, filename, file_type, mime_type, sha256, page_count, document_kind, document_date, "
+                                  "status, extraction, extraction_model, extraction_error, extracted_text, uploaded_by, uploaded_at")
     with db_cursor() as cur:
-        cur.execute(f'''
-            SELECT pf.file_data, pf.filename, pf.file_type, pf.patient_id
-            FROM patient_files pf
-            JOIN patients p ON pf.patient_id = p.id
-            WHERE pf.id = %s AND {_patient_visible_clause()}
-        ''', (file_id, user_id))
+        cur.execute(f"SELECT {cols} FROM patient_files WHERE id = %s AND patient_id = %s", (file_id, patient_id))
         return cur.fetchone()
 
 
+def get_document_pages(file_id: int, patient_id: int, user: dict, with_images: bool = True):
+    require_role(user, "viewer")
+    cols = "dp.id, dp.file_id, dp.page_number, dp.width, dp.height, dp.text" + (", dp.image_png" if with_images else "")
+    with db_cursor() as cur:
+        cur.execute(f"""
+            SELECT {cols} FROM document_pages dp JOIN patient_files pf ON pf.id = dp.file_id
+            WHERE dp.file_id = %s AND pf.patient_id = %s ORDER BY dp.page_number
+        """, (file_id, patient_id))
+        return cur.fetchall()
+
+
+def set_document_extraction(file_id: int, patient_id: int, user: dict, *, extraction: Any, model: str | None,
+                            document_kind: str | None, document_date=None, error: str | None = None,
+                            extracted_text: str | None = None) -> None:
+    require_role(user, "editor")
+    with db_cursor(commit=True) as cur:
+        cur.execute("""
+            UPDATE patient_files SET extraction = %s, extraction_model = %s, document_kind = COALESCE(%s, document_kind),
+                   document_date = COALESCE(%s, document_date), extraction_error = %s,
+                   extracted_text = COALESCE(%s, extracted_text),
+                   status = CASE WHEN %s IS NULL THEN 'extracted' ELSE 'failed' END
+            WHERE id = %s AND patient_id = %s
+        """, (json_dumps_safe(extraction), model, document_kind, document_date, error, extracted_text, error, file_id, patient_id))
+        audit(cur, user, patient_id, "document.extract", "document", file_id, {"model": model, "error": error})
+
+
+def set_document_status(file_id: int, patient_id: int, user: dict, status: str) -> None:
+    require_role(user, "editor")
+    with db_cursor(commit=True) as cur:
+        cur.execute("UPDATE patient_files SET status = %s WHERE id = %s AND patient_id = %s", (status, file_id, patient_id))
+
+
+def delete_document(file_id: int, patient_id: int, user: dict) -> None:
+    require_role(user, "editor")
+    with db_cursor(commit=True) as cur:
+        cur.execute("DELETE FROM patient_files WHERE id = %s AND patient_id = %s", (file_id, patient_id))
+        audit(cur, user, patient_id, "document.delete", "document", file_id)
+
+
 # ---------------------------------------------------------------------------
-# Vitals
+# Extracted items (pending review)
 # ---------------------------------------------------------------------------
 
-def save_vital_reading(patient_id, user_id, reading_type, value, unit, source="Manual Entry",
-                       notes="", raw_data=None, recorded_at=None, source_file_id=None):
-    """Save one reading. recorded_at is when it was taken; None means unknown."""
+def add_extracted_items(patient_id: int, file_id: int, user: dict, items: list[dict]) -> list[int]:
+    """items: [{page_number, item_type, payload, confidence}]. Status starts as pending."""
+    require_role(user, "editor")
+    ids = []
     with db_cursor(commit=True) as cur:
-        _assert_patient_access(cur, patient_id, user_id)
-        cur.execute('''
-            SELECT value FROM vitals_history
-            WHERE patient_id = %s AND reading_type = %s
-            ORDER BY COALESCE(recorded_at, timestamp) DESC LIMIT 1
-        ''', (patient_id, reading_type))
+        for it in items:
+            cur.execute("""
+                INSERT INTO extracted_items (patient_id, file_id, page_number, item_type, payload, confidence)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+            """, (patient_id, file_id, it.get("page_number"), it["item_type"], json_dumps_safe(it["payload"]), it.get("confidence")))
+            ids.append(cur.fetchone()["id"])
+        audit(cur, user, patient_id, "document.items", "document", file_id, {"count": len(items)})
+    return ids
+
+
+def list_extracted_items(patient_id: int, user: dict, file_id: int | None = None, status: str | None = None):
+    require_role(user, "viewer")
+    sql = "SELECT * FROM extracted_items WHERE patient_id = %s"
+    params: list[Any] = [patient_id]
+    if file_id is not None:
+        sql += " AND file_id = %s"
+        params.append(file_id)
+    if status:
+        sql += " AND status = %s"
+        params.append(status)
+    sql += " ORDER BY file_id, page_number, id"
+    with db_cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+def set_extracted_item_status(item_id: int, patient_id: int, user: dict, status: str, payload: Any = None) -> None:
+    require_role(user, "editor")
+    with db_cursor(commit=True) as cur:
+        if payload is not None:
+            cur.execute("""UPDATE extracted_items SET status = %s, payload = %s, reviewed_by = %s, reviewed_at = CURRENT_TIMESTAMP
+                           WHERE id = %s AND patient_id = %s""", (status, json_dumps_safe(payload), user["id"], item_id, patient_id))
+        else:
+            cur.execute("""UPDATE extracted_items SET status = %s, reviewed_by = %s, reviewed_at = CURRENT_TIMESTAMP
+                           WHERE id = %s AND patient_id = %s""", (status, user["id"], item_id, patient_id))
+        audit(cur, user, patient_id, f"item.{status}", "extracted_item", item_id)
+
+
+# ---------------------------------------------------------------------------
+# Vitals and lab values
+# ---------------------------------------------------------------------------
+
+def save_vital_reading(patient_id: int, user: dict, reading_type: str, value: float, unit: str | None,
+                       source: str = "Manual Entry", notes: str = "", raw_data: Any = None, recorded_at=None,
+                       source_file_id: int | None = None, source_page: int | None = None,
+                       extracted_item_id: int | None = None, reference_range: str | None = None,
+                       flag: str | None = None) -> int:
+    require_role(user, "editor")
+    with db_cursor(commit=True) as cur:
+        _assert_patient(cur, patient_id)
+        cur.execute("""SELECT value FROM vitals_history WHERE patient_id = %s AND reading_type = %s
+                       ORDER BY COALESCE(recorded_at, timestamp) DESC LIMIT 1""", (patient_id, reading_type))
         prev = cur.fetchone()
-        previous_value = prev['value'] if prev else None
+        previous_value = prev["value"] if prev else None
         change = value - previous_value if previous_value is not None else None
-
-        cur.execute('''
-            INSERT INTO vitals_history
-            (patient_id, reading_type, value, unit, source, notes, raw_data, previous_value,
-             change_from_previous, recorded_at, source_file_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-        ''', (patient_id, reading_type, value, unit, source, notes, json_dumps_safe(raw_data),
-              previous_value, change, recorded_at, source_file_id))
-        return cur.fetchone()['id']
-
-
-def save_extracted_readings(patient_id, user_id, file_id, filename, rows) -> int:
-    """Persist rows produced by utils.normalize_extracted_readings."""
-    count = 0
-    for row in rows:
-        save_vital_reading(
-            patient_id, user_id,
-            row["reading_type"], row["value"], row["unit"],
-            source=f"Extracted: {filename}",
-            notes=row.get("notes") or "",
-            raw_data=row.get("raw"),
-            recorded_at=row.get("recorded_at"),
-            source_file_id=file_id,
-        )
-        count += 1
-    return count
+        cur.execute("""
+            INSERT INTO vitals_history (patient_id, reading_type, value, unit, source, notes, raw_data, previous_value,
+                                        change_from_previous, recorded_at, source_file_id, source_page, extracted_item_id,
+                                        reference_range, flag, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+        """, (patient_id, reading_type, value, unit, source, notes, json_dumps_safe(raw_data), previous_value, change,
+              recorded_at, source_file_id, source_page, extracted_item_id, reference_range, flag, user["id"]))
+        row_id = cur.fetchone()["id"]
+        audit(cur, user, patient_id, "vital.create", "vital", row_id, {"reading_type": reading_type, "value": value})
+        return row_id
 
 
-def get_vitals_history(patient_id, user_id, reading_type=None):
-    base = f'''
-        SELECT vh.* FROM vitals_history vh
-        JOIN patients p ON vh.patient_id = p.id
-        WHERE vh.patient_id = %s AND {_patient_visible_clause()}
-    '''
+def get_vitals_history(patient_id: int, user: dict, reading_type: str | None = None, limit: int = 500):
+    require_role(user, "viewer")
     with db_cursor() as cur:
         if reading_type:
-            cur.execute(base + ' AND vh.reading_type = %s ORDER BY COALESCE(vh.recorded_at, vh.timestamp) DESC',
-                        (patient_id, user_id, reading_type))
+            cur.execute("""SELECT * FROM vitals_history WHERE patient_id = %s AND reading_type = %s
+                           ORDER BY COALESCE(recorded_at, timestamp) DESC LIMIT %s""", (patient_id, reading_type, limit))
         else:
-            cur.execute(base + ' ORDER BY COALESCE(vh.recorded_at, vh.timestamp) DESC', (patient_id, user_id))
+            cur.execute("""SELECT * FROM vitals_history WHERE patient_id = %s
+                           ORDER BY COALESCE(recorded_at, timestamp) DESC LIMIT %s""", (patient_id, limit))
         return cur.fetchall()
 
 
-def get_latest_vitals(patient_id, user_id):
+def get_latest_vitals(patient_id: int, user: dict):
+    require_role(user, "viewer")
     with db_cursor() as cur:
-        cur.execute(f'''
-            SELECT DISTINCT ON (vh.reading_type)
-                   vh.reading_type, vh.value, vh.unit, vh.timestamp, vh.recorded_at, vh.source, vh.change_from_previous
-            FROM vitals_history vh
-            JOIN patients p ON vh.patient_id = p.id
-            WHERE vh.patient_id = %s AND {_patient_visible_clause()}
-            ORDER BY vh.reading_type, COALESCE(vh.recorded_at, vh.timestamp) DESC
-        ''', (patient_id, user_id))
+        cur.execute("""
+            SELECT DISTINCT ON (reading_type) reading_type, value, unit, timestamp, recorded_at, source,
+                   change_from_previous, reference_range, flag, source_file_id, source_page
+            FROM vitals_history WHERE patient_id = %s
+            ORDER BY reading_type, COALESCE(recorded_at, timestamp) DESC
+        """, (patient_id,))
         return cur.fetchall()
+
+
+def delete_vital_reading(reading_id: int, patient_id: int, user: dict) -> None:
+    require_role(user, "editor")
+    with db_cursor(commit=True) as cur:
+        cur.execute("DELETE FROM vitals_history WHERE id = %s AND patient_id = %s", (reading_id, patient_id))
+        audit(cur, user, patient_id, "vital.delete", "vital", reading_id)
 
 
 # ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
 
-def get_doctor_agents(active_only=True):
+def get_doctor_agents(active_only: bool = True):
     with db_cursor() as cur:
         if active_only:
-            cur.execute('SELECT * FROM doctor_agents WHERE is_active = TRUE ORDER BY id')
+            cur.execute("SELECT * FROM doctor_agents WHERE is_active = TRUE ORDER BY sort_order, id")
         else:
-            cur.execute('SELECT * FROM doctor_agents ORDER BY id')
+            cur.execute("SELECT * FROM doctor_agents ORDER BY sort_order, id")
         return cur.fetchall()
 
 
-def update_doctor_agent(agent_type, role=None, goal=None, backstory=None, is_active=None):
-    updates = []
-    values: list[Any] = []
-    if role:
-        updates.append("role = %s")
-        values.append(role)
-    if goal:
-        updates.append("goal = %s")
-        values.append(goal)
-    if backstory:
-        updates.append("backstory = %s")
-        values.append(backstory)
-    if is_active is not None:
-        updates.append("is_active = %s")
-        values.append(bool(is_active))
-    if not updates:
+def update_doctor_agent(user: dict, agent_type: str, **fields) -> None:
+    require_role(user, "admin")
+    allowed = {"display_name", "role", "goal", "backstory", "system_prompt", "is_active", "provider", "model", "domains"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k} = %s")
+            vals.append(json_dumps_safe(v) if k == "domains" else v)
+    if not sets:
         return
-    updates.append("updated_at = CURRENT_TIMESTAMP")
-    values.append(agent_type)
+    vals.append(agent_type)
     with db_cursor(commit=True) as cur:
-        cur.execute(f"UPDATE doctor_agents SET {', '.join(updates)} WHERE agent_type = %s", values)
+        cur.execute(f"UPDATE doctor_agents SET {', '.join(sets)}, updated_at = CURRENT_TIMESTAMP WHERE agent_type = %s", vals)
+        audit(cur, user, None, "agent.update", "agent", None, {"agent_type": agent_type, "fields": sorted(fields)})
 
 
 # ---------------------------------------------------------------------------
-# Doctor memory
+# Doctor memory (findings the board stores for later runs)
 # ---------------------------------------------------------------------------
 
-def save_doctor_memory(patient_id, user_id, doctor_type, memory_type, content, importance=5, source_file_id=None):
+def save_doctor_memory(patient_id: int, user: dict, doctor_type: str, memory_type: str, content: str,
+                       importance: int = 5, source_file_id: int | None = None) -> None:
+    require_role(user, "viewer")
     with db_cursor(commit=True) as cur:
-        _assert_patient_access(cur, patient_id, user_id)
-        cur.execute('''
-            INSERT INTO doctor_memory (patient_id, doctor_type, memory_type, content, importance, source_file_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        ''', (patient_id, doctor_type, memory_type, content, importance, source_file_id))
+        _assert_patient(cur, patient_id)
+        cur.execute("""INSERT INTO doctor_memory (patient_id, doctor_type, memory_type, content, importance, source_file_id)
+                       VALUES (%s, %s, %s, %s, %s, %s)""", (patient_id, doctor_type, memory_type, content, importance, source_file_id))
 
 
-def get_doctor_memories(patient_id, user_id, doctor_type=None):
-    base = f'''
-        SELECT dm.* FROM doctor_memory dm
-        JOIN patients p ON dm.patient_id = p.id
-        WHERE dm.patient_id = %s AND {_patient_visible_clause()}
-    '''
+def get_doctor_memories(patient_id: int, user: dict, doctor_type: str | None = None, limit: int = 50):
+    require_role(user, "viewer")
     with db_cursor() as cur:
         if doctor_type:
-            cur.execute(base + ' AND dm.doctor_type = %s ORDER BY dm.importance DESC, dm.created_at DESC',
-                        (patient_id, user_id, doctor_type))
+            cur.execute("""SELECT * FROM doctor_memory WHERE patient_id = %s AND doctor_type = %s
+                           ORDER BY importance DESC, created_at DESC LIMIT %s""", (patient_id, doctor_type, limit))
         else:
-            cur.execute(base + ' ORDER BY dm.importance DESC, dm.created_at DESC', (patient_id, user_id))
+            cur.execute("""SELECT * FROM doctor_memory WHERE patient_id = %s
+                           ORDER BY importance DESC, created_at DESC LIMIT %s""", (patient_id, limit))
         return cur.fetchall()
 
 
 # ---------------------------------------------------------------------------
-# Conversations and chat
+# Conversations and chat (per user, per patient)
 # ---------------------------------------------------------------------------
 
-def get_user_conversations(user_id, patient_id=None):
+def get_user_conversations(user: dict, patient_id: int | None = None):
+    require_role(user, "viewer")
     with db_cursor() as cur:
         if patient_id:
-            cur.execute('''
-                SELECT c.*, p.name as patient_name
-                FROM conversations c
-                LEFT JOIN patients p ON c.patient_id = p.id
-                WHERE c.user_id = %s AND c.patient_id = %s
-                ORDER BY c.updated_at DESC
-            ''', (user_id, patient_id))
+            cur.execute("""SELECT c.*, p.name AS patient_name FROM conversations c LEFT JOIN patients p ON c.patient_id = p.id
+                           WHERE c.user_id = %s AND c.patient_id = %s ORDER BY c.updated_at DESC""", (user["id"], patient_id))
         else:
-            cur.execute('''
-                SELECT c.*, p.name as patient_name
-                FROM conversations c
-                LEFT JOIN patients p ON c.patient_id = p.id
-                WHERE c.user_id = %s
-                ORDER BY c.updated_at DESC
-            ''', (user_id,))
+            cur.execute("""SELECT c.*, p.name AS patient_name FROM conversations c LEFT JOIN patients p ON c.patient_id = p.id
+                           WHERE c.user_id = %s ORDER BY c.updated_at DESC""", (user["id"],))
         return cur.fetchall()
 
 
-def create_conversation(user_id, patient_id, title='New Conversation'):
+def create_conversation(user: dict, patient_id: int, title: str = "New Conversation") -> int:
+    require_role(user, "viewer")
     with db_cursor(commit=True) as cur:
-        _assert_patient_access(cur, patient_id, user_id)
-        cur.execute('''
-            INSERT INTO conversations (user_id, patient_id, title)
-            VALUES (%s, %s, %s)
-            RETURNING id
-        ''', (user_id, patient_id, title))
-        return cur.fetchone()['id']
+        _assert_patient(cur, patient_id)
+        cur.execute("INSERT INTO conversations (user_id, patient_id, title) VALUES (%s, %s, %s) RETURNING id",
+                    (user["id"], patient_id, title))
+        return cur.fetchone()["id"]
 
 
-def get_conversation(conversation_id, user_id):
+def _assert_conversation(cur, conversation_id: int, user: dict) -> dict:
+    cur.execute("SELECT * FROM conversations WHERE id = %s AND user_id = %s", (conversation_id, user["id"]))
+    conv = cur.fetchone()
+    if conv is None:
+        raise PermissionError(f"user {user['id']} may not access conversation {conversation_id}")
+    return conv
+
+
+def get_conversation(conversation_id: int, user: dict):
+    require_role(user, "viewer")
     with db_cursor() as cur:
-        cur.execute('SELECT * FROM conversations WHERE id = %s AND user_id = %s', (conversation_id, user_id))
+        cur.execute("SELECT * FROM conversations WHERE id = %s AND user_id = %s", (conversation_id, user["id"]))
         return cur.fetchone()
 
 
-def update_conversation_title(conversation_id, user_id, title):
+def update_conversation_title(conversation_id: int, user: dict, title: str) -> None:
     with db_cursor(commit=True) as cur:
-        _assert_conversation_access(cur, conversation_id, user_id)
-        cur.execute('UPDATE conversations SET title = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s',
-                    (title, conversation_id))
+        _assert_conversation(cur, conversation_id, user)
+        cur.execute("UPDATE conversations SET title = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s", (title, conversation_id))
 
 
-def delete_conversation(conversation_id, user_id):
+def delete_conversation(conversation_id: int, user: dict) -> None:
     with db_cursor(commit=True) as cur:
-        _assert_conversation_access(cur, conversation_id, user_id)
-        cur.execute('DELETE FROM conversations WHERE id = %s', (conversation_id,))
+        _assert_conversation(cur, conversation_id, user)
+        cur.execute("DELETE FROM conversations WHERE id = %s", (conversation_id,))
 
 
-def save_chat_message_to_conversation(patient_id, conversation_id, user_id, role, content,
-                                      addressed_to=None, responding_doctor=None, metadata=None):
+def save_chat_message(patient_id: int, conversation_id: int, user: dict, role: str, content: str,
+                      addressed_to: str | None = None, responding_doctor: str | None = None, metadata: Any = None) -> int:
     with db_cursor(commit=True) as cur:
-        _assert_conversation_access(cur, conversation_id, user_id)
-        _assert_patient_access(cur, patient_id, user_id)
-        cur.execute('''
-            INSERT INTO chat_history (patient_id, conversation_id, role, content, addressed_to, responding_doctor, metadata)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-        ''', (patient_id, conversation_id, role, content, addressed_to, responding_doctor, json_dumps_safe(metadata)))
-        msg_id = cur.fetchone()['id']
-        cur.execute('UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = %s', (conversation_id,))
+        conv = _assert_conversation(cur, conversation_id, user)
+        if conv["patient_id"] != patient_id:
+            raise PermissionError("conversation belongs to another patient")
+        cur.execute("""INSERT INTO chat_history (patient_id, conversation_id, role, content, addressed_to, responding_doctor, metadata)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                    (patient_id, conversation_id, role, content, addressed_to, responding_doctor, json_dumps_safe(metadata)))
+        msg_id = cur.fetchone()["id"]
+        cur.execute("UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = %s", (conversation_id,))
         return msg_id
 
 
-def get_conversation_history(conversation_id, user_id, limit=100):
+def get_conversation_history(conversation_id: int, user: dict, limit: int = 100):
     with db_cursor() as cur:
-        cur.execute('''
-            SELECT ch.* FROM chat_history ch
-            JOIN conversations c ON ch.conversation_id = c.id
-            WHERE ch.conversation_id = %s AND c.user_id = %s
-            ORDER BY ch.timestamp ASC
-            LIMIT %s
-        ''', (conversation_id, user_id, limit))
+        cur.execute("""SELECT ch.* FROM chat_history ch JOIN conversations c ON ch.conversation_id = c.id
+                       WHERE ch.conversation_id = %s AND c.user_id = %s ORDER BY ch.timestamp ASC LIMIT %s""",
+                    (conversation_id, user["id"], limit))
         return cur.fetchall()
