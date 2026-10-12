@@ -231,6 +231,9 @@ def get_provider(name: str | None = None) -> Provider:
     name = (name or os.environ.get("MODEL_PROVIDER") or "openai").lower()
     if name == "fake":
         return FakeProvider()
+    if name == "demo":
+        from demo import DemoProvider
+        return DemoProvider()
     factory = _provider_factories.get(name)
     if factory is None:
         raise ProviderError(f"unknown provider {name}; known: {sorted(_provider_factories)}")

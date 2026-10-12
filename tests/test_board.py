@@ -92,6 +92,15 @@ def test_routing_falls_back_to_model_then_general_duty():
     assert chosen == ["general_duty"] and "general duty" in reason
 
 
+def test_keyword_routing_matches_whole_words_only():
+    agents = _agents() + [{"agent_type": "gastroenterologist", "display_name": "GI", "system_prompt": "", "domains": ["ast", "alt", "liver"],
+                           "is_active": True, "model": None}]
+    assert board.keyword_route("What changed since the last visit?", "", agents) == []
+    assert board.keyword_route("His AST and ALT were high", "", agents) == ["gastroenterologist"]
+    assert board.keyword_route("heart rate 70 bpm", "", agents) == ["cardiologist"]
+    assert board.keyword_route("the bp was 150", "", agents) == ["cardiologist"]
+
+
 def test_full_review_routes_to_every_specialist():
     chosen, reason, call = board.route(FakeProvider(), "Please do a full review", "", _agents())
     assert set(chosen) == {"cardiologist", "nephrologist", "pharmacist", "general_duty"} and call is None

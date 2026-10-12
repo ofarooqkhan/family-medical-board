@@ -220,6 +220,11 @@ def build_context(patient_id: int, user: dict, max_chars: int = 24000) -> str:
 # Routing (item 10)
 # ---------------------------------------------------------------------------
 
+def _domain_hits(domains: list[str], text: str) -> int:
+    """Whole-word matches only: "ast" must not match "last", "bp" must not match "bpm"."""
+    return sum(1 for d in domains if re.search(r"(?<![a-z0-9])" + re.escape(d.lower()) + r"(?![a-z0-9])", text))
+
+
 def keyword_route(query: str, context: str, agents: list[dict]) -> list[str]:
     text = f"{query}\n{context}".lower()
     q = query.lower()
@@ -228,8 +233,8 @@ def keyword_route(query: str, context: str, agents: list[dict]) -> list[str]:
         if a["agent_type"] == "coordinator":
             continue
         domains = a.get("domains") or []
-        q_hits = sum(1 for d in domains if d.lower() in q)
-        c_hits = sum(1 for d in domains if d.lower() in text)
+        q_hits = _domain_hits(domains, q)
+        c_hits = _domain_hits(domains, text)
         score = q_hits * 10 + min(c_hits, 5)
         if q_hits or (c_hits >= 2 and not q.strip()):
             hits.append((score, a["agent_type"]))
