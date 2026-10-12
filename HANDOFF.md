@@ -1,6 +1,7 @@
 # HANDOFF
 
-Written 2026-10-12 at the end of the Step 0 audit session, mid A0 bootstrap.
+Written 2026-10-12 at the end of the Step 0 audit session. Updated the same
+day by the A0 session that finished the bootstrap.
 Read this top to bottom before touching anything. Everything a fresh session
 needs is here or in files this document names.
 
@@ -88,30 +89,19 @@ app with a basic layer first, then deep dive into orchestration and iterate.
 - Replit connector, GitHub connector, and both repos verified reachable
   (see section 6 for the one transient failure).
 - All eight decisions answered by the owner. Locked in section 4.
-- A0 partially written: `utils.py` and `database.py` exist on disk, uncommitted.
 - Replit source snapshot saved to `replit_snapshot/` so this repo is
   self-contained.
+- A0 bootstrap complete and committed: `app.py` rewritten from the snapshot
+  with the eleven edits from the old section 8.2 (now listed in section 3),
+  `utils.py`, `database.py`, `tests/test_utils.py` (20 tests, all passing),
+  `requirements.txt`, `.env.example`, `.replit`, `.streamlit/config.toml`,
+  `README.md`, `pytest.ini`. All six audit bugs closed in code.
 
-### In progress: A0 bootstrap
-A0 is the branch-zero commit that brings the Replit app into this repo, fixes
-the six audit bugs, and adds tests and config. Nothing is committed yet.
-
-Written, not yet verified by running:
-- `utils.py` (new, complete)
-- `database.py` (rewritten from the Replit original, complete)
-
-Not yet written:
-- `app.py` (rewritten from `replit_snapshot/app.py`, see section 8 for the
-  exact edits)
-- `tests/test_utils.py`
-- `requirements.txt`
-- `.env.example`
-- `.replit` and `.streamlit/config.toml` (copy from snapshot)
-- `README.md`
-- `pytest.ini` or `pyproject.toml` with pytest config
-
-Empty directories exist but git will not track them: `static/`, `tests/`,
-`.streamlit/`.
+### Not verified
+A0 has not been run against a Postgres or deployed to Replit. `app.py`,
+`utils.py`, and `database.py` pass `py_compile`; only `utils.py` has tests.
+First run on Replit is part of item 1 (the migration must upgrade the live
+database in place).
 
 ### Not started
 Items 1 through 17. Nothing beyond A0.
@@ -119,13 +109,16 @@ Items 1 through 17. Nothing beyond A0.
 ### Git state
 - Repo: `https://github.com/ofarooqkhan/family-medical-board` (public).
   One branch, `main`. All work goes there. Small commits, pushed often.
-- Local checkout in this container: `/home/user/Omer-` (old directory name,
-  `origin` points at `family-medical-board`). A fresh session should select
-  `family-medical-board` when it starts and work on `main`.
-- History so far on `main`: `c198775` snapshot and handoff, `303d4c5` utils
-  and database, `23c7ce0` and `55aff1e` handoff updates, `34001e7` email
-  removal, `aadcfce` repo switch, plus the commit that records the move to a
-  single branch.
+- Local checkout in this container: `/home/user/family-medical-board`.
+- History on `main` up to `53fa39e`: `c198775` snapshot and handoff,
+  `303d4c5` utils and database, `23c7ce0` and `55aff1e` handoff updates,
+  `34001e7` email removal, `aadcfce` repo switch, `53fa39e` single branch.
+- The A0 session was given the harness branch
+  `claude/inspiring-galileo-3pdhym` as its push target and could not push to
+  `main` without the owner's say in that session. The A0 commits are on that
+  branch, which is a fast-forward of `main`. First thing for the next session:
+  `git fetch origin && git checkout main && git merge --ff-only origin/claude/inspiring-galileo-3pdhym && git push -u origin main`,
+  or the owner merges it on GitHub. Then delete the session branch.
 - Retired: `ofarooqkhan/Omer-` (holds the same early commits, stale, do not
   push there) and the session branch
   `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` (merged into
@@ -141,7 +134,7 @@ Items 1 through 17. Nothing beyond A0.
 
 ## 3. Every file touched
 
-All paths relative to `/home/user/Omer-`.
+All paths relative to `/home/user/family-medical-board`.
 
 ### `.gitignore`
 Copied unchanged from the Replit and GitHub repo. Excludes `*.db`,
@@ -200,6 +193,34 @@ Changes from the original:
 - `migrate_orphan_patients_to_user` kept, flagged for removal in item 2.
 - `get_db_connection` raises `RuntimeError` if `DATABASE_URL` is unset.
 - `SPECIALIST_ORDER` constant exported for app.py.
+
+### `app.py` (rewritten from `replit_snapshot/app.py`)
+Edits applied, nothing else changed:
+1. `parse_addressed_doctor` removed; imported from `utils` and called with
+   `agent_types=agents.keys()`.
+2. Dead `render_chat_interface` and `render_patient_management` deleted.
+3. Dev login uses `dev_user_id(name)`; `uuid` import dropped.
+4. Every scoped `db.` call passes `user_id`; `user_id=None` defaults removed
+   from `render_*`, `get_patient_context`, `run_consultation`.
+5. `render_files_tab` pushes extracted readings into `vitals_history` via
+   `normalize_extracted_readings` and `db.save_extracted_readings` (bug 1).
+6. "Consulted on" and "Response provided" memory writes removed (bug 6).
+7. 200-char file summary removed from `get_patient_context` (bug 5).
+8. Vitals history shows "Recorded" (NULL shown as "unknown") next to "Ingested".
+9. Agent settings lists inactive agents too and has an Active toggle saved
+   through `update_doctor_agent(is_active=...)`.
+10. Every patient-scoped `db.` write is wrapped in `try/except PermissionError`
+    showing "You do not have access to this record."
+11. Specialist loop uses `db.SPECIALIST_ORDER` instead of a literal list.
+DICOM code, PWA tags, Replit Auth header login, and gpt-4o calls untouched.
+Unused `docx` imports kept; DOCX export returns in item 13.
+
+### `tests/test_utils.py`, `tests/__init__.py`, `pytest.ini`
+20 pytest cases over `utils.py` only. Run with `python3 -m pytest tests/ -q`.
+
+### `requirements.txt`, `.env.example`, `.replit`, `.streamlit/config.toml`, `README.md`
+`requirements.txt` is the snapshot's dependency list without `docx>=0.2.4`
+(bug 4) and with `pytest>=8`. `.replit` is a byte copy of the snapshot.
 
 ### `replit_snapshot/app.py`, `.replit`, `pyproject.toml`, `README.md`
 Verbatim copies of the live Replit files, reference only. See the README
@@ -364,16 +385,19 @@ Phase D after 7 and 6: items 15, 16.
 
 ## 5. Commands
 
-Environment: Python 3.11.17 at `python3`. `pip` on PATH is Python 3.13's, so
-use `python3 -m pip`. No virtualenv exists yet. Nothing is installed yet.
-There is no Postgres in this container; database tests cannot run here until
-a test database is arranged (item 2). `DATABASE_URL` is unset here.
+Environment: the A0 session had Python 3.13.16 at `python3` (the audit
+session had 3.11.17; it varies per container, the app targets 3.11 on
+Replit). Use `python3 -m pip`. A `.venv` with pytest only existed in the A0
+container; recreate it. There is no Postgres in this container; database
+tests cannot run here until a test database is arranged (item 2).
+`DATABASE_URL` is unset here.
 
 ```bash
 # Set up
-cd /home/user/Omer-
+cd /home/user/family-medical-board
 python3 -m venv .venv && . .venv/bin/activate
-python3 -m pip install -r requirements.txt   # file does not exist yet, see section 8
+python3 -m pip install pytest                # unit tests only
+python3 -m pip install -r requirements.txt   # full app
 
 # Unit tests (no database needed)
 python3 -m pytest tests/ -q
@@ -442,10 +466,10 @@ Treat as transient. If a Replit tool is needed and unavailable, use
 `replit_snapshot/` instead.
 
 ### 6.5 Partially verified
-`utils.py` and `database.py` pass `python3 -m py_compile`. They have not been
-executed against a database or covered by tests yet. Section 8.3 adds the
-tests for `utils.py`. `database.py` can only be exercised once a Postgres is
-available (item 2).
+`utils.py`, `database.py`, and `app.py` pass `python3 -m py_compile`.
+`utils.py` is covered by `tests/test_utils.py`. `database.py` and `app.py`
+have not been executed against a database; that happens on the first Replit
+run in item 1.
 
 ---
 
@@ -478,18 +502,19 @@ Harness rules in force:
 - Commit messages end with these two trailer lines:
   ```
   Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-  Claude-Session: https://claude.ai/code/session_011SRXiTj76yxe1NZBeKNKyt
+  Claude-Session: https://claude.ai/code/session_01YEQENGWk2342jbi1tKb9jX
   ```
+  The session URL changes per session; use the one the harness gives you.
 - PR descriptions, if one is ever requested, end with:
   ```
   🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
-  https://claude.ai/code/session_011SRXiTj76yxe1NZBeKNKyt
+  https://claude.ai/code/session_01YEQENGWk2342jbi1tKb9jX
   ```
 - Do not create a pull request unless asked.
 - Do not put a model identifier in any pushed artifact.
-- Scratchpad for temp files:
-  `/tmp/claude-0/-home-user-Omer-/d4a96854-8531-55bd-8812-4694a308a6cb/scratchpad`
+- Scratchpad for temp files: the path the harness prints at session start
+  under `/tmp/claude-0/`.
 
 Credentials and ids:
 - Replit app: `medical-board-history`, replId
@@ -504,144 +529,53 @@ Credentials and ids:
 
 ---
 
-## 8. Next step: finish A0 and push
+## 8. Next step: item 1 (Alembic, pool), then item 2
 
-Execute in this order. No questions to the owner are needed.
+Before anything else, land the A0 commits on `main` (see Git state in
+section 2). Then work directly on `main` in small commits, one per logical
+change. No questions to the owner are needed for item 1.
 
-### 8.1 Verify what exists
-```bash
-cd /home/user/Omer-
-python3 -m py_compile utils.py database.py
-```
-Fix any syntax error before continuing.
+### 8.1 Item 1 scope
+- Add `alembic>=1.13` to `requirements.txt`. `alembic init alembic`, then
+  `alembic/env.py` reads `DATABASE_URL` from the environment (no
+  `sqlalchemy.url` in `alembic.ini`). Alembic needs SQLAlchemy; add
+  `sqlalchemy>=2.0` too. psycopg2-binary is already present.
+- Migration `0001_initial`: the eight tables exactly as
+  `database.init_database` creates them today, including `recorded_at` and
+  `source_file_id` on `vitals_history`, written with `op.create_table`. Seed
+  the six default agents in the same migration with `op.bulk_insert` using
+  `ON CONFLICT DO NOTHING` semantics (use `op.execute` with the INSERT so
+  re-running on the live database is a no-op).
+- Because the live Replit database already has these tables, the first run
+  must not fail on "relation already exists". Use `alembic stamp head` logic:
+  in `database.run_migrations()`, if `alembic_version` is absent but
+  `patients` exists, stamp `0001` then upgrade; otherwise `upgrade head`.
+  Show the owner this plan before running it against the live database
+  (standing rule: no production touch without the migration plan shown).
+- Replace `init_database()` body with `run_migrations()` calling Alembic's
+  command API (`alembic.command.upgrade(config, "head")`) at startup. Keep
+  `init_default_agents` only if the migration does not seed; prefer the
+  migration.
+- Connection pool: `psycopg2.pool.SimpleConnectionPool(1, 5, DATABASE_URL,
+  cursor_factory=RealDictCursor)` created lazily; `get_db_connection()`
+  returns a context manager that gets from and puts back to the pool. Every
+  `conn.close()` in `database.py` becomes a put-back. Streamlit reruns on
+  every interaction, so the pool must live in a module global, not session
+  state.
+- Done when: a fresh Postgres reaches the same schema as the old
+  `init_database` produced (compare `\d` output or `information_schema`),
+  and a Replit redeploy keeps row counts.
 
-### 8.2 Write `app.py`
-Start from `replit_snapshot/app.py`. Apply exactly these edits:
+### 8.2 Testing item 1
+A throwaway Postgres is needed. Options in order of preference: a Replit
+test database (owner creates a second one), or `docker run postgres:16` if
+the container has Docker, or `pip install testing.postgresql` with a local
+`initdb` if available. Record which one worked here.
 
-1. Delete the `parse_addressed_doctor` function. Add
-   `from utils import parse_addressed_doctor, normalize_extracted_readings, dev_user_id`.
-   In `render_chat_interface_with_conversations`, call
-   `parse_addressed_doctor(user_input, agent_types=agents.keys())`.
-2. Delete `render_chat_interface` and `render_patient_management` (dead code,
-   never called from `main`).
-3. In `render_login_page`, dev login path: replace
-   `user_id = str(uuid.uuid4())` with `user_id = dev_user_id(name)`. Drop the
-   `uuid` import if unused.
-4. Every `db.` call that gained a `user_id` parameter (listed in section 3)
-   must pass `user_id`. Specifically:
-   `db.delete_conversation(conv['id'], user_id)`,
-   `db.get_conversation(conversation_id, user_id)`,
-   `db.update_conversation_title(conversation_id, user_id, title)`,
-   `db.save_chat_message_to_conversation(patient_id, conversation_id, user_id, role, content, ...)`,
-   `db.get_conversation_history(conversation_id, user_id, limit=50)`,
-   `db.create_conversation(user_id, patient_id, title)` (unchanged order),
-   `db.update_patient(patient_id, user_id, **fields)`,
-   `db.delete_patient(patient_id, user_id)`,
-   `db.save_patient_file(patient_id, user_id, filename, file_type, file_data, extracted_text, extracted_values)`,
-   `db.get_file_data(f['id'], user_id)`,
-   `db.save_vital_reading(patient_id, user_id, vital_type, value, unit, "Manual Entry", notes)`,
-   `db.save_doctor_memory(patient_id, user_id, doctor_type, memory_type, content, importance=...)`.
-   Remove the `user_id=None` defaults on `render_*` functions; `user_id` is
-   always available from `main`.
-5. In `render_files_tab`, after `file_id = db.save_patient_file(...)`, add:
-   ```python
-   if extracted_values is not None and file_type in ("cgm", "blood_pressure", "lab_results", "general"):
-       rows = normalize_extracted_readings(file_type, extracted_values)
-       n = db.save_extracted_readings(patient_id, user_id, file_id, file.name, rows)
-       if n:
-           st.info(f"{n} readings added to vitals history")
-   ```
-   This closes audit bug 1.
-6. In `run_consultation`, delete the loop at the end that writes
-   `"Consulted on: ..."` memories for every specialist, and delete the
-   `"Query: ... Response provided."` memory in the addressed-doctor branch.
-   Closes audit bug 6. Real findings memory is item 9's job.
-7. In `get_patient_context`, delete the block that appends
-   `f"  Summary: {f['extracted_text'][:200]}..."` per file. Keep the filename
-   list. `run_consultation` already appends up to 1000 chars per file.
-   Closes audit bug 5.
-8. In `render_vitals_tab`, the history dataframe: show `recorded_at` next to
-   `timestamp` and label the columns "Recorded" and "Ingested". If
-   `recorded_at` is NaT, display "unknown".
-9. In `render_agent_settings`, call `db.get_doctor_agents(active_only=False)`
-   and add a `st.toggle("Active", value=agent['is_active'], key=f"active_{agent['agent_type']}")`
-   whose value is passed as `is_active=` to `db.update_doctor_agent` on save.
-   Wrap every `db.` write in the UI in `try/except PermissionError` that shows
-   `st.error("You do not have access to this record.")`.
-10. Leave the DICOM code, PWA tags, and Replit Auth header login as is.
-11. Keep the gpt-4o calls for A0. Claude comes in with item 3 and item 17.
-
-### 8.3 Write `tests/test_utils.py`
-pytest. Cover at minimum:
-- `parse_addressed_doctor`: "ask the cardiologist" returns cardiologist,
-  "I endorse this" returns None (word boundary), agent_types filter excludes
-  a match, empty string returns None.
-- `parse_reading_timestamp`: ISO with Z, "2026-03-04 08:15", "04/03/2026",
-  garbage returns None, None returns None, empty string returns None.
-- `normalize_extracted_readings`: cgm list yields glucose rows with
-  `recorded_at` set when timestamp present and None when absent; blood
-  pressure yields three rows per reading when pulse present and two when
-  not; lab_results yields `lab_hba1c` with "Reference:" in notes; non-list
-  input yields []; readings with non-numeric value are skipped.
-- `dev_user_id`: same name same id, case and whitespace insensitive,
-  different names differ, starts with "dev-".
-Also add `tests/__init__.py` (empty) and a `pytest.ini` with
-`[pytest]\ntestpaths = tests`.
-
-### 8.4 Write config files
-- `requirements.txt` from `replit_snapshot/pyproject.toml` dependencies, with
-  `docx>=0.2.4` removed (audit bug 4) and `pytest>=8` added. Keep the `>=`
-  floors as they are.
-- `.env.example` listing `DATABASE_URL=`, `OPENAI_API_KEY=`,
-  `AI_INTEGRATIONS_OPENAI_API_KEY=`, `AI_INTEGRATIONS_OPENAI_BASE_URL=`,
-  `ANTHROPIC_API_KEY=` with one comment line each.
-- Copy `replit_snapshot/.replit` to `.replit` unchanged.
-- `.streamlit/config.toml` with:
-  ```
-  [server]
-  headless = true
-  port = 5000
-  address = "0.0.0.0"
-  enableCORS = false
-  enableXsrfProtection = false
-  ```
-- `README.md`: three paragraphs. What it is, that it never gives medical
-  advice, how to run (section 5 commands). Link to HANDOFF.md for status.
-
-### 8.5 Verify
-```bash
-python3 -m py_compile utils.py database.py app.py
-python3 -m venv .venv && . .venv/bin/activate
-python3 -m pip install pytest
-python3 -m pytest tests/ -q
-```
-All tests must pass. Do not install the full requirements just to run unit
-tests; `tests/test_utils.py` imports only `utils`.
-
-### 8.6 Commit and push
-Commits 1 and 2 below already exist as `c198775` and `303d4c5` (commit 2 is
-partial, utils and database only). Add, in this order, each with the trailer
-from section 7:
-1. "Bootstrap app from Replit source with audit fixes" containing `app.py`,
-   `requirements.txt`, `.env.example`, `.replit`, `.streamlit/config.toml`,
-   `README.md`, and the HANDOFF.md state update. Body lists the six bugs
-   fixed by number.
-2. "Add unit tests for extraction helpers" containing `tests/`, `pytest.ini`.
-
-Then:
-```bash
-git push -u origin main
-```
-Retry with 2s, 4s, 8s, 16s backoff on failure. Report the commit hashes and
-the push result to the owner.
-
-### 8.7 Then start item 1
-Work directly on `main` in small commits, one per logical change.
-
-Item 1 scope: add Alembic, `alembic/env.py` reading `DATABASE_URL`,
-migration 0001 that creates the eight tables with the A0 columns, replace
-`init_database()` CREATE IF NOT EXISTS calls with `alembic upgrade head` run
-at startup, add `psycopg2.pool.SimpleConnectionPool` behind
-`get_db_connection`. Done when a fresh Postgres reaches the same schema as
-`database.init_database` would have produced, and a redeploy does not lose
-rows.
+### 8.3 Then item 2
+Remove the orphan rule in `_patient_visible_clause()` and
+`get_all_patients_for_user_or_orphans`, delete
+`migrate_orphan_patients_to_user`, and add the cross-patient leakage test
+against the test database. Backfill: the owner's existing patient becomes
+patient 1 under the owner's user; add patient 2. Show the UPDATE before
+running it.
