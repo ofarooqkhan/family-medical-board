@@ -8,6 +8,32 @@ To run: create a virtualenv, `python3 -m pip install -r requirements.txt`, set `
 
 ## Deploy
 
+Three ways to get a running copy. Each uses the same Dockerfile and runs the
+database migrations itself at startup.
+
+**Render (one click, hosted, about 7 USD a month plus the model usage).**
+Click the button, sign in to Render with GitHub, enter your `OPENAI_API_KEY`
+when asked, and wait for the first deploy. Every later push to `main`
+redeploys.
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ofarooqkhan/family-medical-board)
+
+**Railway (one click, hosted).** New Project, Deploy from GitHub repo, pick
+this repository, add a PostgreSQL service, set `DATABASE_URL` to its
+connection string and `OPENAI_API_KEY`, set the start command to `./start.sh`.
+
+**Your own machine (free, needs Docker Desktop).**
+
+```bash
+git clone https://github.com/ofarooqkhan/family-medical-board
+cd family-medical-board
+OPENAI_API_KEY=sk-... docker compose up --build
+```
+
+Then open http://localhost:5000. Phones on the same Wi-Fi can use the
+machine's local address. Data lives in the `pgdata` Docker volume.
+
+### Notes from the original deploy section
 Locally with Docker: `export OPENAI_API_KEY=sk-...` then `docker compose up --build`. This starts Postgres 16 and the app on http://localhost:5000; migrations run on every start and data persists in the `pgdata` volume. `docker compose down -v` throws the database away.
 
 On Render: push the repo to GitHub, then in the Render dashboard choose New, then Blueprint, and select the repo. `render.yaml` defines one Docker web service and one Postgres database and wires `DATABASE_URL` between them. Render prompts for `OPENAI_API_KEY` (required) and `ANTHROPIC_API_KEY` (not used yet, can be left blank) when the Blueprint is created; both can be changed later under the service's Environment tab. Every push to the connected branch redeploys.

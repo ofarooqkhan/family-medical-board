@@ -603,7 +603,29 @@ Credentials and ids:
 
 ## 8. Next step: get it hosted, then real-model runs
 
-### 8.1 Hosting (owner action, one time)
+### 8.0 What happened with Replit (2026-10-12, end of session)
+The session used the Replit connector to sync the repo into the existing
+Repl `medical-board-history` (replId `0910c133-b692-4c80-b4d8-39d37884f87b`).
+Result:
+- Replit Agent pulled commit `b472af2` verbatim (app.py byte-identical),
+  installed the dependencies from `pyproject.toml`, kept `DATABASE_URL` and
+  the OpenAI integration variables, and started Streamlit on port 5000.
+- The live database had several `users` rows with the same email from the
+  old dev login, so revision 0003 failed on the unique email index. Alembic
+  rolled it back; `alembic_version` is `0001` there. Commit `484e1ac` fixes
+  the revision (tested on a legacy copy with duplicates).
+- The agent then stopped responding to further instructions (connector
+  reports phase `paused`), and creating a new Repl failed with
+  `requires_active_subscription`. So the Replit account, not the code, is
+  what blocks finishing there.
+To finish on Replit, the owner needs two actions inside the Repl: pull
+`main` (Git pane, or approve the paused agent task), then press Run. The
+app will migrate the database (0002, then the fixed 0003) and show the login
+page. Publish from the Replit UI (Autoscale is already set in `.replit`).
+The old dev users keep their patients; none of them can sign in, so the
+first real signup becomes admin.
+
+### 8.1 Hosting elsewhere (owner action, one time)
 Recommended: Render Blueprint. In the Render dashboard, New, Blueprint,
 pick the GitHub repo `ofarooqkhan/family-medical-board`. `render.yaml`
 creates the web service and a Postgres. Enter `OPENAI_API_KEY` when asked
@@ -628,6 +650,12 @@ review and read every specialist's output for any advice phrasing.
 `tests/test_board.py` has a live test slot: add one marked to skip without
 a key that sends the twenty advice prompts to the real model and asserts
 `declined_advice_request`.
+
+### 8.2a One-click paths
+The README has a Deploy to Render button, Railway steps, and the
+`docker compose up` command for a Mac. All three were written without
+reaching those sites from the build container; the Docker image itself
+builds in CI, so the Docker path is the most certain.
 
 ### 8.3 Then
 1. Anthropic provider when the key arrives (section 2).
