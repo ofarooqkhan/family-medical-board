@@ -1,0 +1,169 @@
+"""Upload, extract, review, confirm. Database tests."""
+import io
+import os
+
+import pytest
+
+import documents
+import extraction
+from extraction import DocumentClassification, LabReportDocument, PrescriptionDocument
+from providers import FakeProvider
+
+pytestmark = pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set")
+
+
+def make_pdf(texts):
+    import pymupdf
+    doc = pymupdf.open()
+    for t in texts:
+        doc.new_page().insert_text((72, 72), t)
+    return doc.tobytes()
+
+
+def make_png():
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (200, 100), "white").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+RX = {
+    "prescriber": "Dr. Khan", "clinic": None, "patient_name": None, "document_date": "2026-09-01", "diagnoses": [],
+    "notes": None, "overall_confidence": 0.9,
+    "medications": [
+        {"name": "Metformin", "generic_name": "metformin", "dose": "500 mg", "route": "oral", "frequency": "twice daily",
+         "duration": None, "instructions": "after meals", "page": 1, "confidence": 0.95, "low_confidence_fields": []},
+        {"name": "Amlod?ne", "generic_name": None, "dose": "5 mg", "route": None, "frequency": "once daily", "duration": None,
+         "instructions": None, "page": 2, "confidence": 0.4, "low_confidence_fields": ["name"]},
+    ],
+}
+LAB = {
+    "lab_name": "City Lab", "ordering_doctor": None, "patient_name": None, "document_date": "2026-09-05", "comments": None,
+    "overall_confidence": 0.9,
+    "values": [{"test_name": "HbA1c", "value_text": "7.8", "numeric_value": 7.8, "unit": "%", "reference_range": "4.0-5.6",
+                "flag": "high", "collected_at": None, "page": 1, "confidence": 0.9, "low_confidence_fields": []},
+               {"test_name": "Culture", "value_text": "No growth", "numeric_value": None, "unit": None, "reference_range": None,
+                "flag": "normal", "collected_at": None, "page": 1, "confidence": 0.7, "low_confidence_fields": []}],
+}
+
+
+def _patient(accounts):
+    import database as db
+    return db.create_patient(accounts["editor"], "Parent One", age=80)
+
+
+def test_upload_without_provider_stores_pages_only(accounts):
+    import database as db
+    pid = _patient(accounts)
+    out = documents.ingest_upload(pid, accounts["editor"], "rx.pdf", "application/pdf", make_pdf(["Rx one", "two"]), provider=None)
+    assert out["pages"] == 2 and out["items"] == 0
+    doc = db.get_document(out["file_id"], pid, accounts["viewer"])
+    assert doc["status"] == "uploaded" and doc["page_count"] == 2 and "Rx one" in doc["extracted_text"]
+    pages = db.get_document_pages(out["file_id"], pid, accounts["viewer"])
+    assert len(pages) == 2 and bytes(pages[0]["image_png"])[:4] == b"\x89PNG"
+
+
+def test_viewer_cannot_upload(accounts):
+    pid = _patient(accounts)
+    with pytest.raises(PermissionError):
+        documents.ingest_upload(pid, accounts["viewer"], "x.png", "image/png", make_png(), provider=None)
+
+
+def test_prescription_flow_confirm_and_reject(accounts):
+    import database as db
+    import medications
+    ed = accounts["editor"]
+    pid = _patient(accounts)
+    fake = FakeProvider(responses={
+        DocumentClassification: {"kind": "prescription", "confidence": 0.9, "patient_name": None, "document_date": None,
+                                 "language": "en", "reason": "rx"},
+        PrescriptionDocument: RX,
+    })
+    out = documents.ingest_upload(pid, ed, "rx.pdf", "application/pdf", make_pdf(["Rx", "p2"]), provider=fake)
+    assert out["kind"] == "prescription" and out["items"] == 2 and out["error"] is None
+    assert [c["purpose"] for c in out["calls"]] == ["classify", "extract:prescription"]
+    doc = db.get_document(out["file_id"], pid, ed)
+    assert doc["status"] == "extracted" and doc["document_kind"] == "prescription"
+    assert str(doc["document_date"]) == "2026-09-01" and doc["extraction_model"]
+
+    # Nothing is in the medication list until the family confirms.
+    assert medications.list_medications(pid, ed) == []
+    pending = documents.pending_review(pid, ed)
+    items = pending[out["file_id"]]
+    assert [i["page_number"] for i in items] == [1, 2]
+
+    # Confirm the first as is, correct the second's name, then confirm it.
+    r1 = documents.confirm_item(items[0]["id"], pid, ed, items[0]["payload"])
+    corrected = dict(items[1]["payload"], name="Amlodipine")
+    r2 = documents.confirm_item(items[1]["id"], pid, ed, corrected)
+    meds = {m["name"]: m for m in medications.list_medications(pid, ed, status="active")}
+    assert set(meds) == {"Metformin", "Amlodipine"}
+    assert meds["Metformin"]["prescriber"] == "Dr. Khan" and str(meds["Metformin"]["start_date"]) == "2026-09-01"
+    assert meds["Metformin"]["source_file_id"] == out["file_id"] and meds["Metformin"]["source_page"] == 1
+    assert meds["Amlodipine"]["source_page"] == 2 and meds["Amlodipine"]["extracted_item_id"] == items[1]["id"]
+    assert r1["medication_id"] == meds["Metformin"]["id"] and r2["medication_id"] == meds["Amlodipine"]["id"]
+    # Document is reviewed once no item is pending; confirming twice is a no-op.
+    assert db.get_document(out["file_id"], pid, ed)["status"] == "reviewed"
+    assert documents.confirm_item(items[0]["id"], pid, ed, items[0]["payload"]).get("already") is True
+    assert len(medications.list_medications(pid, ed)) == 2
+    stored = {i["id"]: i for i in db.list_extracted_items(pid, ed)}
+    assert stored[items[1]["id"]]["payload"]["name"] == "Amlodipine"
+
+
+def test_lab_flow_writes_vitals_with_source_links(accounts):
+    import database as db
+    ed = accounts["editor"]
+    pid = _patient(accounts)
+    fake = FakeProvider(responses={LabReportDocument: LAB})
+    out = documents.ingest_upload(pid, ed, "lab.png", "image/png", make_png(), provider=fake, kind="lab_report")
+    assert [c["purpose"] for c in out["calls"]] == ["extract:lab_report"]
+    items = documents.pending_review(pid, ed)[out["file_id"]]
+    hba1c = next(i for i in items if i["payload"]["test_name"] == "HbA1c")
+    culture = next(i for i in items if i["payload"]["test_name"] == "Culture")
+    res = documents.confirm_item(hba1c["id"], pid, ed, hba1c["payload"])
+    row = db.get_vitals_history(pid, ed, reading_type="lab_hba1c")[0]
+    assert row["id"] == res["vital_id"] and row["value"] == pytest.approx(7.8) and row["unit"] == "%"
+    assert row["reference_range"] == "4.0-5.6" and row["flag"] == "high"
+    assert str(row["recorded_at"])[:10] == "2026-09-05"
+    assert row["source_file_id"] == out["file_id"] and row["source_page"] == 1 and row["extracted_item_id"] == hba1c["id"]
+    with pytest.raises(ValueError):
+        documents.confirm_item(culture["id"], pid, ed, culture["payload"])  # no numeric value
+    documents.reject_item(culture["id"], pid, ed)
+    assert documents.pending_review(pid, ed) == {}
+    assert db.get_document(out["file_id"], pid, ed)["status"] == "reviewed"
+
+
+def test_extraction_failure_is_recorded_not_raised(accounts):
+    import database as db
+    ed = accounts["editor"]
+    pid = _patient(accounts)
+    out = documents.ingest_upload(pid, ed, "lab.png", "image/png", make_png(), provider=FakeProvider(), kind="lab_report")
+    assert out["error"] and out["items"] == 0
+    doc = db.get_document(out["file_id"], pid, ed)
+    assert doc["status"] == "failed" and "FakeProvider" in doc["extraction_error"]
+    # Re-running with a working provider replaces the result.
+    out2 = documents.run_extraction(pid, out["file_id"], ed, FakeProvider(responses={LabReportDocument: LAB}), kind="lab_report")
+    assert out2["items"] == 2 and db.get_document(out["file_id"], pid, ed)["status"] == "extracted"
+
+
+def test_rerun_discards_old_pending_items(accounts):
+    ed = accounts["editor"]
+    pid = _patient(accounts)
+    fake = FakeProvider(responses={LabReportDocument: LAB})
+    out = documents.ingest_upload(pid, ed, "lab.png", "image/png", make_png(), provider=fake, kind="lab_report")
+    documents.run_extraction(pid, out["file_id"], ed, fake, kind="lab_report")
+    pending = documents.pending_review(pid, ed)[out["file_id"]]
+    assert len(pending) == 2
+
+
+def test_confirm_is_scoped_by_patient(accounts):
+    import database as db
+    ed = accounts["editor"]
+    a = _patient(accounts)
+    b = db.create_patient(ed, "Parent B")
+    out = documents.ingest_upload(a, ed, "lab.png", "image/png", make_png(), provider=FakeProvider(responses={LabReportDocument: LAB}), kind="lab_report")
+    item = documents.pending_review(a, ed)[out["file_id"]][0]
+    with pytest.raises(PermissionError):
+        documents.confirm_item(item["id"], b, ed, item["payload"])
+    with pytest.raises(PermissionError):
+        documents.confirm_item(item["id"], a, accounts["viewer"], item["payload"])

@@ -1,7 +1,8 @@
 """Database and auth tests. Run only when TEST_DATABASE_URL points at a throwaway Postgres.
 
-Every test starts from an empty public schema. Nothing here touches the
-DATABASE_URL the app uses.
+Every test starts from an empty public schema (fixtures db, migrated and
+accounts live in tests/conftest.py). Nothing here touches the DATABASE_URL
+the app uses.
 """
 import os
 import threading
@@ -61,15 +62,6 @@ def _raw():
     return psycopg2.connect(TEST_URL)
 
 
-def _reset_schema():
-    conn = _raw()
-    conn.autocommit = True
-    cur = conn.cursor()
-    cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-    cur.close()
-    conn.close()
-
-
 def _query(sql, params=None):
     conn = _raw()
     cur = conn.cursor()
@@ -88,34 +80,6 @@ def _columns(table):
 
 def _tables():
     return {r[0] for r in _query("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")}
-
-
-@pytest.fixture
-def db(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", TEST_URL)
-    import database
-    database.close_pool()
-    _reset_schema()
-    yield database
-    database.close_pool()
-
-
-@pytest.fixture
-def migrated(db):
-    db.run_migrations()
-    return db
-
-
-@pytest.fixture
-def accounts(migrated):
-    """An admin, an editor, and a viewer created through the real signup flow."""
-    import auth
-    admin = auth.signup("admin@example.com", "correct horse battery", "Admin")
-    inv_e = auth.create_invite(admin, "editor")
-    editor = auth.signup("editor@example.com", "correct horse battery", "Editor", inv_e["code"])
-    inv_v = auth.create_invite(admin, "viewer")
-    viewer = auth.signup("viewer@example.com", "correct horse battery", "Viewer", inv_v["code"])
-    return {"admin": admin, "editor": editor, "viewer": viewer}
 
 
 # Migrations
