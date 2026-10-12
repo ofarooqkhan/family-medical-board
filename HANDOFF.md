@@ -117,28 +117,25 @@ Empty directories exist but git will not track them: `static/`, `tests/`,
 Items 1 through 17. Nothing beyond A0.
 
 ### Git state
-- Working repo on GitHub: `https://github.com/ofarooqkhan/family-medical-board`
-  (public). This replaced `ofarooqkhan/Omer-` as the working repo on
-  2026-10-12 at the owner's request. `Omer-` still holds the same commits up
-  to that point and is now stale; do not push there again.
-- Local checkout in this container: `/home/user/Omer-` (directory name kept,
-  `origin` remote repointed to `family-medical-board`). A fresh session
-  should select `family-medical-board` when it starts.
-- Branches on `family-medical-board`: `main` at the bootstrap commit
-  `c198775`, and `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt`
-  with all work. Commits so far: `c198775` snapshot and handoff, `303d4c5`
-  utils and database, `23c7ce0` and `55aff1e` handoff updates, `34001e7`
-  email removal, plus the commit that records this repo switch.
+- Repo: `https://github.com/ofarooqkhan/family-medical-board` (public).
+  One branch, `main`. All work goes there. Small commits, pushed often.
+- Local checkout in this container: `/home/user/Omer-` (old directory name,
+  `origin` points at `family-medical-board`). A fresh session should select
+  `family-medical-board` when it starts and work on `main`.
+- History so far on `main`: `c198775` snapshot and handoff, `303d4c5` utils
+  and database, `23c7ce0` and `55aff1e` handoff updates, `34001e7` email
+  removal, `aadcfce` repo switch, plus the commit that records the move to a
+  single branch.
+- Retired: `ofarooqkhan/Omer-` (holds the same early commits, stale, do not
+  push there) and the session branch
+  `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` (merged into
+  `main` and deleted at the owner's request for simplicity).
 - Reference clone: `/home/user/medical-board-history`, one commit `206f97f`
   on `main`. Read only in practice. Byte-identical to the zip the owner
   uploaded. Stale legacy code. Do not develop here.
-- Push target rule: only ever push to
-  `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` on
-  `family-medical-board`. `main` there was created by explicit owner request
-  as the PR base; do not push to it directly.
-  Decision 8 (section 4) allows a final mirror push of the same branch to
-  `medical-board-history` at the very end, after an explicit go from the owner
-  at that time.
+- Decision 8 (section 4) allows a final mirror push of `main` to
+  `medical-board-history` at the very end, after an explicit go from the
+  owner at that time.
 
 ---
 
@@ -315,12 +312,12 @@ Rejected: keeping bytes in Postgres (bloat, slow backups, pricier per GB),
 S3 or GCS (more setup for no gain at this scale).
 
 ### 4.8 Where the code lands
-Develop and push only on `family-medical-board` branch
-`claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` (originally
-`Omer-`, replaced at the owner's request). At the very
-end, push the same branch to `medical-board-history` too. The owner said yes
-to this mirror in advance, but still confirm with a one-line "pushing the
-mirror now" before doing it. Before that mirror push, run
+Develop and push on `main` of `family-medical-board`. Originally the
+designated target was a session branch on `Omer-`; the owner replaced the
+repo and then asked for a single branch for simplicity. At the very end,
+push `main` to `medical-board-history` too. The owner said yes to this
+mirror in advance, but still confirm with a one-line "pushing the mirror
+now" before doing it. Before that mirror push, run
 `git -C /home/user/medical-board-history fetch origin main` so the push sends
 a thin pack and is not rejected with HTTP 413.
 
@@ -391,7 +388,7 @@ streamlit run app.py --server.port=5000 --server.address=0.0.0.0
 git status
 git add -A
 git commit -m "<message>"       # attribution trailer required, see section 7
-git push -u origin claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt
+git push -u origin main
 # On network failure retry 4 times with 2s, 4s, 8s, 16s backoff.
 
 # Replit live file read (load tool first)
@@ -412,10 +409,7 @@ remote: Claude doesn't have GitHub access to ofarooqkhan/Omer- for your organiza
 fatal: unable to access 'https://github.com/ofarooqkhan/Omer-/': The requested URL returned error: 403
 ```
 The owner reconnected GitHub from claude.ai settings and the next push
-succeeded. If this recurs, it is the same owner-side fix. The branch is now
-on origin; `git status -sb` shows it tracking
-`origin/claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt`.
-The harmless warning `fatal: expected 'acknowledgments', received 'packfile'
+succeeded. If this recurs, it is the same owner-side fix. The harmless warning `fatal: expected 'acknowledgments', received 'packfile'
 ... proceeding anyway with push` is the session git proxy and can be ignored.
 
 ### 6.2 gh CLI token invalid
@@ -463,9 +457,11 @@ Hard rules from the owner:
 - Branch per task, small reviewable commits.
 - Tests for items 2, 3, 4, 11 before marking them done.
 - Do not touch production data without showing the migration plan first.
-- Only push to `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt`
-  on `ofarooqkhan/family-medical-board`. Never a different branch. Mirror to
+- Only push to `main` on `ofarooqkhan/family-medical-board`. Mirror to
   `medical-board-history` only at the end, after a go.
+- "Branch per task" from the original spec is relaxed to "one commit or a
+  few small commits per task on main" at the owner's request for simplicity.
+  Reintroduce feature branches only if the owner asks.
 - The app must never give medical advice. Agents summarize records and list
   questions for the treating doctor.
 
@@ -634,17 +630,13 @@ from section 7:
 
 Then:
 ```bash
-git push -u origin claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt
+git push -u origin main
 ```
-Retry with 2s, 4s, 8s, 16s backoff on failure. Report the three commit hashes
-and the push result to the owner.
+Retry with 2s, 4s, 8s, 16s backoff on failure. Report the commit hashes and
+the push result to the owner.
 
 ### 8.7 Then start item 1
-Branch per task rule: create `claude/item-1-alembic` from the A0 commit,
-develop there, but still push only to the designated branch per section 7.
-In practice that means: do the item 1 work as further commits on the
-designated branch, since that is the only push target. Mention this
-constraint to the owner in the item 1 report.
+Work directly on `main` in small commits, one per logical change.
 
 Item 1 scope: add Alembic, `alembic/env.py` reading `DATABASE_URL`,
 migration 0001 that creates the eight tables with the A0 columns, replace
