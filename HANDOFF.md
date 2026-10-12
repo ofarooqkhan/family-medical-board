@@ -117,16 +117,25 @@ Empty directories exist but git will not track them: `static/`, `tests/`,
 Items 1 through 17. Nothing beyond A0.
 
 ### Git state
-- Working repo: `/home/user/Omer-`, remote `https://github.com/ofarooqkhan/Omer-`.
-  Branch `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` is
-  pushed and tracking origin. Commits so far: `c198775` snapshot and
-  handoff, `303d4c5` utils and database, `23c7ce0` handoff update, plus the
-  commit that records this fix.
+- Working repo on GitHub: `https://github.com/ofarooqkhan/family-medical-board`
+  (public). This replaced `ofarooqkhan/Omer-` as the working repo on
+  2026-10-12 at the owner's request. `Omer-` still holds the same commits up
+  to that point and is now stale; do not push there again.
+- Local checkout in this container: `/home/user/Omer-` (directory name kept,
+  `origin` remote repointed to `family-medical-board`). A fresh session
+  should select `family-medical-board` when it starts.
+- Branches on `family-medical-board`: `main` at the bootstrap commit
+  `c198775`, and `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt`
+  with all work. Commits so far: `c198775` snapshot and handoff, `303d4c5`
+  utils and database, `23c7ce0` and `55aff1e` handoff updates, `34001e7`
+  email removal, plus the commit that records this repo switch.
 - Reference clone: `/home/user/medical-board-history`, one commit `206f97f`
   on `main`. Read only in practice. Byte-identical to the zip the owner
   uploaded. Stale legacy code. Do not develop here.
 - Push target rule: only ever push to
-  `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` on `Omer-`.
+  `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` on
+  `family-medical-board`. `main` there was created by explicit owner request
+  as the PR base; do not push to it directly.
   Decision 8 (section 4) allows a final mirror push of the same branch to
   `medical-board-history` at the very end, after an explicit go from the owner
   at that time.
@@ -306,8 +315,9 @@ Rejected: keeping bytes in Postgres (bloat, slow backups, pricier per GB),
 S3 or GCS (more setup for no gain at this scale).
 
 ### 4.8 Where the code lands
-Develop and push only on `Omer-` branch
-`claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt`. At the very
+Develop and push only on `family-medical-board` branch
+`claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` (originally
+`Omer-`, replaced at the owner's request). At the very
 end, push the same branch to `medical-board-history` too. The owner said yes
 to this mirror in advance, but still confirm with a one-line "pushing the
 mirror now" before doing it. Before that mirror push, run
@@ -395,8 +405,8 @@ On Replit the app runs with the command in `replit_snapshot/.replit`.
 
 ## 6. Open bugs and verbatim errors
 
-### 6.1 Resolved: push to Omer- works again after the owner reconnected GitHub
-Mid-session every push failed with:
+### 6.1 Resolved: push to GitHub works again after the owner reconnected
+Mid-session every push to the then-working repo `Omer-` failed with:
 ```
 remote: Claude doesn't have GitHub access to ofarooqkhan/Omer- for your organization. An org admin can install the Claude GitHub App at https://github.com/apps/claude/installations/select_target, or reconnect GitHub from claude.ai settings (https://claude.ai/customize/connectors?auth_start=github&auth_start_force=1) to re-link an existing installation
 fatal: unable to access 'https://github.com/ofarooqkhan/Omer-/': The requested URL returned error: 403
@@ -454,7 +464,7 @@ Hard rules from the owner:
 - Tests for items 2, 3, 4, 11 before marking them done.
 - Do not touch production data without showing the migration plan first.
 - Only push to `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt`
-  on `ofarooqkhan/Omer-`. Never a different branch. Mirror to
+  on `ofarooqkhan/family-medical-board`. Never a different branch. Mirror to
   `medical-board-history` only at the end, after a go.
 - The app must never give medical advice. Agents summarize records and list
   questions for the treating doctor.
