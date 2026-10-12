@@ -120,6 +120,28 @@ def test_legacy_database_is_stamped_then_upgraded_and_keeps_rows(db):
     assert "never give medical advice" in prompt.lower()
 
 
+def test_legacy_duplicate_emails_are_resolved_before_the_unique_index(db):
+    """The Replit dev login made one user row per sign-in with the same email."""
+    conn = _raw()
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute(LEGACY_DDL)
+    cur.execute("""INSERT INTO users (id, email, first_name, created_at) VALUES
+                   ('u-old', 'Owner@Example.com', 'Owner', '2026-01-01'),
+                   ('u-mid', 'owner@example.com', 'Owner', '2026-02-01'),
+                   ('u-new', 'owner@example.com', 'Owner', '2026-03-01'),
+                   ('u-other', 'other@example.com', 'Other', '2026-03-01')""")
+    cur.execute("INSERT INTO patients (user_id, name) VALUES ('u-new', 'Parent One')")
+    cur.close()
+    conn.close()
+    db.run_migrations()
+    rows = dict(_query("SELECT id, email FROM users"))
+    assert rows == {"u-old": "Owner@Example.com", "u-mid": None, "u-new": None, "u-other": "other@example.com"}
+    assert _query("SELECT user_id FROM patients")[0][0] == "u-new"
+    import auth
+    assert auth.is_first_user()  # none of the legacy rows has a password, so the next signup is admin
+
+
 def test_second_run_is_a_no_op(migrated):
     before = migrated.migration_plan()
     plan = migrated.run_migrations()

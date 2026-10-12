@@ -101,6 +101,17 @@ def upgrade() -> None:
     op.add_column("users", sa.Column("language", sa.String(8), server_default="en", nullable=False))
     op.add_column("users", sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False))
     op.add_column("users", sa.Column("last_login_at", sa.TIMESTAMP()))
+    # The old development login created a new user row on every sign-in with
+    # the same email. Keep the email on the earliest row and clear it on the
+    # others (they have no password and cannot sign in) so the unique index
+    # can be built. No rows are deleted; their patients stay attached.
+    op.execute("""
+        UPDATE users u SET email = NULL
+        WHERE u.email IS NOT NULL AND u.id <> (
+            SELECT v.id FROM users v
+            WHERE v.email IS NOT NULL AND lower(v.email) = lower(u.email)
+            ORDER BY v.created_at, v.id LIMIT 1)
+    """)
     op.create_index("users_email_lower_idx", "users", [sa.text("lower(email)")], unique=True,
                     postgresql_where=sa.text("email IS NOT NULL"))
 
