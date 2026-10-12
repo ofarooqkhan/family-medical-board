@@ -118,9 +118,9 @@ Items 1 through 17. Nothing beyond A0.
 
 ### Git state
 - Working repo: `/home/user/Omer-`, remote `https://github.com/ofarooqkhan/Omer-`.
-  Zero commits locally and on origin. Branch
-  `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` is checked
-  out and has no commits.
+  Branch `claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt` has
+  two local commits (`c198775`, `303d4c5`) that are NOT pushed. Origin has
+  zero commits. Push is blocked by revoked GitHub App access, see 6.1.
 - Reference clone: `/home/user/medical-board-history`, one commit `206f97f`
   on `main`. Read only in practice. Byte-identical to the zip the owner
   uploaded. Stale legacy code. Do not develop here.
@@ -394,21 +394,29 @@ On Replit the app runs with the command in `replit_snapshot/.replit`.
 
 ## 6. Open bugs and verbatim errors
 
-### 6.1 Push to Omer- returned 403 once, after having worked
-Earlier in the session a dry-run push succeeded:
+### 6.1 BLOCKER: push to Omer- is rejected, GitHub App access revoked
+Two commits exist locally and are NOT on origin:
 ```
-To https://github.com/ofarooqkhan/Omer-
- * [new branch]      claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt -> claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt
-Would set upstream of 'claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt' to 'claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt' of 'origin'
+303d4c5 A0 work in progress: utils helpers and scoped database layer
+c198775 Add Replit source snapshot and handoff document
 ```
-At the time of writing this document, a read failed:
+Earlier in the session a dry-run push succeeded. Now every push fails, six
+attempts with backoff plus one after re-attaching the repo with push access:
 ```
+remote: Claude doesn't have GitHub access to ofarooqkhan/Omer- for your organization. An org admin can install the Claude GitHub App at https://github.com/apps/claude/installations/select_target, or reconnect GitHub from claude.ai settings (https://claude.ai/customize/connectors?auth_start=github&auth_start_force=1) to re-link an existing installation
 fatal: unable to access 'https://github.com/ofarooqkhan/Omer-/': The requested URL returned error: 403
 ```
-The 403 came while the Claude_Code_Remote MCP server was reconnecting, so it
-is most likely the session's git proxy dropping credentials transiently. Retry
-with backoff before investigating. If it persists, run
-`curl -sS "$HTTPS_PROXY/__agentproxy/status"` and read `/root/.ccr/README.md`.
+This is an owner-side fix, not a code fix. The owner must either reconnect
+GitHub at https://claude.ai/connect-github or install the Claude GitHub App
+on `ofarooqkhan/Omer-` from
+https://github.com/apps/claude/installations/select_target. After that, a
+fresh session with `Omer-` selected, or `add_repo` in this one, then:
+```
+git push -u origin claude/multi-agent-medical-advisor-011SRXiTj76yxe1NZBeKNKyt
+```
+Until the push lands, this container is the only copy of the two commits.
+If the container is reclaimed first, the work is reconstructable from this
+document plus `replit_snapshot/`, but it is faster to push.
 
 ### 6.2 gh CLI token invalid
 ```
@@ -614,15 +622,18 @@ python3 -m pytest tests/ -q
 All tests must pass. Do not install the full requirements just to run unit
 tests; `tests/test_utils.py` imports only `utils`.
 
+### 8.0 Before anything else: push the two existing commits
+See 6.1. Once GitHub access is restored, push first, then continue.
+
 ### 8.6 Commit and push
-Three commits, in this order, each with the trailer from section 7:
-1. "Add Replit source snapshot and handoff" containing `replit_snapshot/`,
-   `HANDOFF.md`, `.gitignore`.
-2. "Bootstrap app from Replit source with audit fixes" containing `utils.py`,
-   `database.py`, `app.py`, `requirements.txt`, `.env.example`, `.replit`,
-   `.streamlit/config.toml`, `README.md`. Body lists the six bugs fixed by
-   number.
-3. "Add unit tests for extraction helpers" containing `tests/`, `pytest.ini`.
+Commits 1 and 2 below already exist as `c198775` and `303d4c5` (commit 2 is
+partial, utils and database only). Add, in this order, each with the trailer
+from section 7:
+1. "Bootstrap app from Replit source with audit fixes" containing `app.py`,
+   `requirements.txt`, `.env.example`, `.replit`, `.streamlit/config.toml`,
+   `README.md`, and the HANDOFF.md state update. Body lists the six bugs
+   fixed by number.
+2. "Add unit tests for extraction helpers" containing `tests/`, `pytest.ini`.
 
 Then:
 ```bash
