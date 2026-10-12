@@ -1,7 +1,7 @@
 # HANDOFF
 
 Written 2026-10-12 at the end of the Step 0 audit session. Updated the same
-day by the A0 session that finished the bootstrap.
+day by the session that finished A0 and item 1.
 Read this top to bottom before touching anything. Everything a fresh session
 needs is here or in files this document names.
 
@@ -96,15 +96,23 @@ app with a basic layer first, then deep dive into orchestration and iterate.
   `utils.py`, `database.py`, `tests/test_utils.py` (20 tests, all passing),
   `requirements.txt`, `.env.example`, `.replit`, `.streamlit/config.toml`,
   `README.md`, `pytest.ini`. All six audit bugs closed in code.
+- Item 1 done in code and verified against a local Postgres 16 (see 6.6):
+  Alembic with revisions `0001` (the original eight tables plus the agent
+  seed) and `0002` (vitals `recorded_at`, `source_file_id`),
+  `database.run_migrations()` at startup with stamp-then-upgrade for a
+  pre-Alembic database, `ThreadedConnectionPool` behind `db_cursor()`.
+  Five database tests in `tests/test_database.py` cover fresh upgrade,
+  legacy stamp with row survival, idempotent re-run, cross-user access
+  denial, and the pool under more threads than connections.
 
 ### Not verified
-A0 has not been run against a Postgres or deployed to Replit. `app.py`,
-`utils.py`, and `database.py` pass `py_compile`; only `utils.py` has tests.
-First run on Replit is part of item 1 (the migration must upgrade the live
-database in place).
+`app.py` has never been launched (Streamlit plus crewai are not installed in
+the dev container). The live Replit database has not been migrated; it still
+runs the snapshot code. See section 8 for the plan the owner must approve
+before the first deploy from this repo.
 
 ### Not started
-Items 1 through 17. Nothing beyond A0.
+Items 2 through 17.
 
 ### Git state
 - Repo: `https://github.com/ofarooqkhan/family-medical-board` (public).
@@ -113,9 +121,9 @@ Items 1 through 17. Nothing beyond A0.
 - History on `main` up to `53fa39e`: `c198775` snapshot and handoff,
   `303d4c5` utils and database, `23c7ce0` and `55aff1e` handoff updates,
   `34001e7` email removal, `aadcfce` repo switch, `53fa39e` single branch.
-- The A0 session was given the harness branch
+- The A0 and item 1 session was given the harness branch
   `claude/inspiring-galileo-3pdhym` as its push target and could not push to
-  `main` without the owner's say in that session. The A0 commits are on that
+  `main` without the owner's say in that session. Those commits are on that
   branch, which is a fast-forward of `main`. First thing for the next session:
   `git fetch origin && git checkout main && git merge --ff-only origin/claude/inspiring-galileo-3pdhym && git push -u origin main`,
   or the owner merges it on GitHub. Then delete the session branch.
@@ -160,9 +168,39 @@ Pure helpers, no Streamlit or database imports, so they are unit testable.
   same name to the same user. Fix for audit bug 2.
 - `json_dumps_safe(value)`.
 
-### `database.py` (rewritten from Replit original)
-Same eight tables, same seed agents, same function names where possible.
-Changes from the original:
+### `alembic.ini`, `alembic/env.py`, `alembic/script.py.mako`, `alembic/versions/`
+Standard `alembic init` layout. `alembic.ini` holds no URL; `env.py` reads
+`sqlalchemy.url` set in code by `database.run_migrations()` and falls back
+to `DATABASE_URL`. `env.py` rewrites `postgres://` and `postgresql://` to
+`postgresql+psycopg2://` because SQLAlchemy 2.1 maps a bare `postgresql://`
+to psycopg 3, which is not installed. Revisions:
+- `0001_initial_schema.py`: the eight tables exactly as the pre-Alembic
+  `init_database()` built them (verified by `pg_dump --schema-only` diff,
+  only `alembic_version` differs) and the six-agent seed with
+  `ON CONFLICT DO NOTHING`.
+- `0002_vitals_recorded_at.py`: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+  for `recorded_at` and `source_file_id`. IF NOT EXISTS so a database that
+  already got these columns from the A0 `init_database()` upgrades too.
+CLI use: `DATABASE_URL=... alembic upgrade head`, `alembic current`,
+`alembic history`. New revision: `alembic revision -m "..."` then edit.
+
+### `database.py` (rewritten from Replit original, then item 1)
+Item 1 changes:
+- `db_cursor(commit=False)` context manager is the only way to run SQL.
+  Gets a connection from a module-global `psycopg2.pool.ThreadedConnectionPool`
+  (`POOL_MIN=1`, `POOL_MAX=8`), commits or rolls back, returns the
+  connection, discards it on socket-level errors. A `BoundedSemaphore(POOL_MAX)`
+  makes callers wait up to `POOL_WAIT_SECONDS` instead of getting psycopg2's
+  immediate `PoolError`. Threaded, not Simple, because Streamlit runs each
+  session in its own thread (psycopg2 source: SimpleConnectionPool "can't
+  be shared across different threads").
+- `run_migrations()` replaces `init_database()` (kept as an alias). It calls
+  `migration_plan()`: if `alembic_version` is absent and `patients` exists,
+  `alembic stamp 0001` first, then `alembic upgrade head`. Returns the plan.
+- `init_default_agents` removed; the seed lives in revision 0001.
+- `close_pool()` for tests and shutdown. `get_db_connection()` kept as a
+  plain unpooled connect for anything external.
+Earlier A0 changes from the original:
 - Every function that reads or writes patient data now takes `user_id` and
   checks access with `_assert_patient_access` or
   `_assert_conversation_access`, which raise `PermissionError`. Previously
@@ -215,12 +253,16 @@ Edits applied, nothing else changed:
 DICOM code, PWA tags, Replit Auth header login, and gpt-4o calls untouched.
 Unused `docx` imports kept; DOCX export returns in item 13.
 
-### `tests/test_utils.py`, `tests/__init__.py`, `pytest.ini`
-20 pytest cases over `utils.py` only. Run with `python3 -m pytest tests/ -q`.
+### `tests/test_utils.py`, `tests/test_database.py`, `tests/__init__.py`, `pytest.ini`
+20 pytest cases over `utils.py`, no database. 5 cases in `test_database.py`
+that run only when `TEST_DATABASE_URL` is set; they drop and recreate the
+public schema of that database on every test, so never point it at the app
+database. Run with `python3 -m pytest tests/ -q`.
 
 ### `requirements.txt`, `.env.example`, `.replit`, `.streamlit/config.toml`, `README.md`
 `requirements.txt` is the snapshot's dependency list without `docx>=0.2.4`
-(bug 4) and with `pytest>=8`. `.replit` is a byte copy of the snapshot.
+(bug 4) and with `pytest>=8`, `alembic>=1.13`, `sqlalchemy>=2.0`. `.replit`
+is a byte copy of the snapshot.
 
 ### `replit_snapshot/app.py`, `.replit`, `pyproject.toml`, `README.md`
 Verbatim copies of the live Replit files, reference only. See the README
@@ -387,20 +429,26 @@ Phase D after 7 and 6: items 15, 16.
 
 Environment: the A0 session had Python 3.13.16 at `python3` (the audit
 session had 3.11.17; it varies per container, the app targets 3.11 on
-Replit). Use `python3 -m pip`. A `.venv` with pytest only existed in the A0
-container; recreate it. There is no Postgres in this container; database
-tests cannot run here until a test database is arranged (item 2).
-`DATABASE_URL` is unset here.
+Replit). Use `python3 -m pip`. Recreate `.venv` each session. The cloud
+container ships PostgreSQL 16 server binaries and Docker; see 6.6 for the
+commands that start a throwaway cluster. `DATABASE_URL` is unset here.
 
 ```bash
 # Set up
 cd /home/user/family-medical-board
 python3 -m venv .venv && . .venv/bin/activate
-python3 -m pip install pytest                # unit tests only
-python3 -m pip install -r requirements.txt   # full app
+python3 -m pip install pytest alembic sqlalchemy psycopg2-binary   # tests only
+python3 -m pip install -r requirements.txt                          # full app
 
-# Unit tests (no database needed)
+# Unit tests (no database needed; database tests skip)
 python3 -m pytest tests/ -q
+
+# All tests, against a throwaway Postgres (see 6.6). Never the app database.
+TEST_DATABASE_URL="postgresql://postgres@/fmb_pytest?host=/tmp&port=5433" python3 -m pytest tests/ -q
+
+# Migrations by hand
+DATABASE_URL=... alembic current
+DATABASE_URL=... alembic upgrade head
 
 # Syntax check without installing heavy deps
 python3 -m py_compile utils.py database.py app.py
@@ -465,11 +513,25 @@ SdkHttpError dialing https://api.anthropic.com/v2/[redacted]/REDACTED/mcp?... (C
 Treat as transient. If a Replit tool is needed and unavailable, use
 `replit_snapshot/` instead.
 
+### 6.6 Throwaway Postgres in the cloud container
+PostgreSQL 16 is installed but not running. `initdb` refuses to run as root
+and the `postgres` user cannot traverse the scratchpad path, so the cluster
+lives under `/tmp`:
+```bash
+PGBIN=/usr/lib/postgresql/16/bin; PGDATA=/tmp/fmb_pgdata
+mkdir -p $PGDATA && chown postgres:postgres $PGDATA
+su postgres -c "$PGBIN/initdb -D $PGDATA -A trust -U postgres"
+su postgres -c "$PGBIN/pg_ctl -D $PGDATA -l $PGDATA/log -o '-p 5433 -k /tmp' start"
+psql -h /tmp -p 5433 -U postgres -c "CREATE DATABASE fmb_pytest;"
+```
+The doc sites `alembic.sqlalchemy.org` and `psycopg.org` do not resolve
+from this container. The installed packages' docstrings and `alembic init`
+templates were used as the reference instead.
+
 ### 6.5 Partially verified
 `utils.py`, `database.py`, and `app.py` pass `python3 -m py_compile`.
-`utils.py` is covered by `tests/test_utils.py`. `database.py` and `app.py`
-have not been executed against a database; that happens on the first Replit
-run in item 1.
+`utils.py` and `database.py` are covered by tests against Postgres 16.
+`app.py` has not been launched anywhere yet.
 
 ---
 
@@ -529,53 +591,42 @@ Credentials and ids:
 
 ---
 
-## 8. Next step: item 1 (Alembic, pool), then item 2
+## 8. Next step: land on main, migrate the live database, then item 2
 
-Before anything else, land the A0 commits on `main` (see Git state in
-section 2). Then work directly on `main` in small commits, one per logical
-change. No questions to the owner are needed for item 1.
+### 8.1 Land the commits on `main`
+See Git state in section 2. One fast-forward merge, then delete the session
+branch.
 
-### 8.1 Item 1 scope
-- Add `alembic>=1.13` to `requirements.txt`. `alembic init alembic`, then
-  `alembic/env.py` reads `DATABASE_URL` from the environment (no
-  `sqlalchemy.url` in `alembic.ini`). Alembic needs SQLAlchemy; add
-  `sqlalchemy>=2.0` too. psycopg2-binary is already present.
-- Migration `0001_initial`: the eight tables exactly as
-  `database.init_database` creates them today, including `recorded_at` and
-  `source_file_id` on `vitals_history`, written with `op.create_table`. Seed
-  the six default agents in the same migration with `op.bulk_insert` using
-  `ON CONFLICT DO NOTHING` semantics (use `op.execute` with the INSERT so
-  re-running on the live database is a no-op).
-- Because the live Replit database already has these tables, the first run
-  must not fail on "relation already exists". Use `alembic stamp head` logic:
-  in `database.run_migrations()`, if `alembic_version` is absent but
-  `patients` exists, stamp `0001` then upgrade; otherwise `upgrade head`.
-  Show the owner this plan before running it against the live database
-  (standing rule: no production touch without the migration plan shown).
-- Replace `init_database()` body with `run_migrations()` calling Alembic's
-  command API (`alembic.command.upgrade(config, "head")`) at startup. Keep
-  `init_default_agents` only if the migration does not seed; prefer the
-  migration.
-- Connection pool: `psycopg2.pool.SimpleConnectionPool(1, 5, DATABASE_URL,
-  cursor_factory=RealDictCursor)` created lazily; `get_db_connection()`
-  returns a context manager that gets from and puts back to the pool. Every
-  `conn.close()` in `database.py` becomes a put-back. Streamlit reruns on
-  every interaction, so the pool must live in a module global, not session
-  state.
-- Done when: a fresh Postgres reaches the same schema as the old
-  `init_database` produced (compare `\d` output or `information_schema`),
-  and a Replit redeploy keeps row counts.
+### 8.2 Migration plan for the live Replit database (owner must approve)
+The live app still runs the snapshot code on its own copy of the files. The
+first deploy from this repo runs `database.run_migrations()` at startup,
+which will do exactly this on the live database:
+1. `migration_plan()` finds no `alembic_version` table and an existing
+   `patients` table.
+2. `alembic stamp 0001`: writes one row to a new `alembic_version` table.
+   No table is created or altered.
+3. `alembic upgrade head`: runs `0002`, which is two
+   `ALTER TABLE vitals_history ADD COLUMN IF NOT EXISTS` statements.
+   No rows are touched. Every later start finds `0002` and does nothing.
+This was exercised on a copy of the pre-Alembic schema with rows in it
+(`tests/test_database.py::test_legacy_database_is_stamped_then_upgraded_and_keeps_rows`).
+Before deploying: take a Replit database backup (Database pane, or
+`pg_dump "$DATABASE_URL" > backup.sql` in the Replit shell), then push this
+repo's files to the Replit workspace, add `alembic`, `sqlalchemy` to its
+dependencies (`uv add alembic sqlalchemy` or let `pyproject.toml` be
+regenerated from `requirements.txt`), run once, and check
+`alembic current` prints `0002`. Show this plan to the owner and get a yes
+before touching the live database. Not done in any session so far.
 
-### 8.2 Testing item 1
-A throwaway Postgres is needed. Options in order of preference: a Replit
-test database (owner creates a second one), or `docker run postgres:16` if
-the container has Docker, or `pip install testing.postgresql` with a local
-`initdb` if available. Record which one worked here.
-
-### 8.3 Then item 2
+### 8.3 Item 2
 Remove the orphan rule in `_patient_visible_clause()` and
 `get_all_patients_for_user_or_orphans`, delete
-`migrate_orphan_patients_to_user`, and add the cross-patient leakage test
-against the test database. Backfill: the owner's existing patient becomes
-patient 1 under the owner's user; add patient 2. Show the UPDATE before
-running it.
+`migrate_orphan_patients_to_user` and its two call sites in
+`render_login_page`, and extend `tests/test_database.py` with the
+cross-patient leakage test (two users, two patients each, every read
+function returns only the caller's rows, every write on the other user's
+patient raises). Backfill on the live database: the owner's existing
+patient gets `user_id` set to the owner's user row; add patient 2 through
+the UI. That backfill is one UPDATE; show it before running it. Write it as
+revision `0003` only if it must run everywhere; otherwise it is a one-off
+the owner runs in the Replit shell.
