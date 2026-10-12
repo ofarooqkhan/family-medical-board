@@ -1,0 +1,28 @@
+# Render Blueprint. In the Render dashboard choose New > Blueprint, pick this
+# GitHub repo, and Render creates the web service and the Postgres database
+# below. OPENAI_API_KEY and ANTHROPIC_API_KEY are prompted for at creation
+# time (sync: false) and never stored in this file.
+services:
+  - type: web
+    name: family-medical-board
+    runtime: docker
+    plan: starter
+    region: oregon
+    healthCheckPath: /_stcore/health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: family-medical-board-db
+          property: connectionString
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: PORT
+        value: "5000"
+
+databases:
+  - name: family-medical-board-db
+    plan: basic-256mb
+    region: oregon

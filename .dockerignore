@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+tests
+replit_snapshot
+*.md
+!README.md
+.env
+.env.local
+patient_data_uploads
+shared_uploads
+uploads
