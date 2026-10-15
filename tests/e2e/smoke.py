@@ -114,6 +114,14 @@ with sync_playwright() as pw:
     wait_idle(page, 2000)
     shot(page, "07-appointments")
     assert "Diabetes follow-up" in page.content()
+    page.get_by_text("Diabetes follow-up with Dr. Khan").first.click()
+    wait_idle(page, 800)
+    hrefs = [a.get_attribute("href") for a in page.locator("a[href]").all()]
+    assert any(h and h.startswith("https://calendar.google.com/calendar/render?action=TEMPLATE") for h in hrefs)
+    assert any(h and h.startswith("https://outlook.live.com/calendar/") for h in hrefs)
+    assert any(h and h.startswith("https://wa.me/?text=") for h in hrefs)
+    assert page.get_by_role("button", name="Apple or other (.ics)").count() == 1
+    shot(page, "07b-appointment-links")
 
     nav(page, "Board")
     page.get_by_test_id("stChatInputTextArea").fill("What changed since the last visit?")
@@ -153,9 +161,26 @@ with sync_playwright() as pw:
     assert "board.run" in page.content() and "medication.add" in page.content()
     shot(page, "13-audit")
 
-    # Sign out and back in.
+    # A reload keeps the sign-in and the patient (cookie-backed session).
+    cookies = {c["name"]: c for c in page.context.cookies()}
+    assert "fmb_session" in cookies, cookies
+    page.goto(BASE)
+    wait_idle(page, 2500)
+    assert "Parent One" in page.content() and page.get_by_role("button", name="Sign out").count() == 1
+    # Home-screen support: patched index.html and the served manifest.
+    r = page.request.get(BASE + "/")
+    assert 'rel="manifest"' in r.text() and "apple-mobile-web-app-capable" in r.text(), r.text()[:500]
+    m = page.request.get(BASE + "/app/static/manifest.json")
+    assert m.ok and m.json()["display"] == "standalone"
+    assert page.request.get(BASE + "/app/static/icon-180.png").ok
+
+    # Sign out clears the cookie, and a reload stays on the login page.
     page.get_by_role("button", name="Sign out").click()
     wait_idle(page, 1500)
+    page.goto(BASE)
+    wait_idle(page, 2500)
+    assert page.get_by_role("button", name="Sign out").count() == 0
+    assert "fmb_session" not in {c["name"] for c in page.context.cookies() if c["value"]}
     page.get_by_test_id("stForm").filter(has_text="Sign in").get_by_label("Email").fill("omer@example.com")
     page.get_by_label("Password").first.fill("correct horse battery")
     page.get_by_role("button", name="Sign in").click()

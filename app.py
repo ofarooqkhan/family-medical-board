@@ -14,6 +14,7 @@ from datetime import date, datetime, time as dtime, timedelta
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 import appointments as appts
 import auth
@@ -44,6 +45,40 @@ def _startup() -> dict:
 
 
 @st.cache_resource
+def _install_home_screen_support() -> str:
+    """Patch Streamlit's index.html once per process so iOS and Android can add
+    the app to the home screen (manifest, apple-touch-icon, standalone mode).
+    Streamlit serves that file from disk on every request, so the patch is live
+    from the next page load. Failures are logged, never shown."""
+    import streamlit as _st
+    marker = "<!-- fmb-home-screen -->"
+    tags = (
+        f"{marker}\n"
+        '    <link rel="manifest" href="./app/static/manifest.json" />\n'
+        '    <link rel="apple-touch-icon" href="./app/static/icon-180.png" />\n'
+        '    <meta name="apple-mobile-web-app-capable" content="yes" />\n'
+        '    <meta name="mobile-web-app-capable" content="yes" />\n'
+        '    <meta name="apple-mobile-web-app-status-bar-style" content="default" />\n'
+        f'    <meta name="apple-mobile-web-app-title" content="{APP_TITLE}" />\n'
+        '    <meta name="theme-color" content="#ffffff" />\n'
+    )
+    try:
+        path = os.path.join(os.path.dirname(_st.__file__), "static", "index.html")
+        with open(path, encoding="utf-8") as fh:
+            html = fh.read()
+        if marker in html:
+            return "already patched"
+        patched = html.replace("<title>Streamlit</title>", tags + f"    <title>{APP_TITLE}</title>", 1)
+        if patched == html:
+            return "title tag not found, skipped"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(patched)
+        return "patched"
+    except Exception as e:  # read-only install or unexpected layout
+        return f"skipped: {e}"
+
+
+@st.cache_resource
 def _provider():
     try:
         return get_provider()
@@ -60,9 +95,69 @@ def _refresh_user() -> None:
     if u:
         fresh = db.get_user(u["id"])
         if fresh and fresh.get("is_active"):
-            st.session_state.user = {k: fresh.get(k) for k in ("id", "email", "display_name", "role", "language", "is_active")}
+            st.session_state.user = {k: fresh.get(k) for k in ("id", "email", "display_name", "role", "language", "is_active", "last_patient_id")}
         else:
             st.session_state.pop("user", None)
+
+
+def _tz() -> str | None:
+    try:
+        return st.context.timezone
+    except Exception:
+        return None
+
+
+def _when(value) -> str:
+    return appts.format_local(value, _tz())
+
+
+def _remember(user: dict) -> None:
+    """Sign-in succeeded: keep it across reloads with a cookie backed by a sessions row."""
+    st.session_state.user = user
+    try:
+        token = auth.create_session(user)
+    except Exception:
+        return
+    st.session_state.session_token = token
+    st.session_state.cookie_action = ("set", token)
+
+
+def _cookie_js() -> None:
+    """Emit the pending cookie change through a zero-height component. The
+    component iframe is same-origin, so it may write the parent's cookies."""
+    action = st.session_state.pop("cookie_action", None)
+    if not action:
+        return
+    kind, token = action
+    if kind == "set":
+        value = f"{auth.SESSION_COOKIE}={token}; Path=/; Max-Age={auth.SESSION_DAYS * 86400}; SameSite=Lax"
+    else:
+        value = f"{auth.SESSION_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax"
+    components.html(
+        "<script>(function(){var d=window.parent.document;var v=" + repr(value) + ";"
+        "if(window.parent.location.protocol==='https:'){v+='; Secure';}d.cookie=v;})();</script>",
+        height=0)
+
+
+def _restore_from_cookie() -> None:
+    """A reload or a new Streamlit session: pick the user up from the cookie."""
+    if st.session_state.get("signed_out"):
+        return
+    try:
+        token = st.context.cookies.get(auth.SESSION_COOKIE)
+    except Exception:
+        token = None
+    if not token:
+        return
+    try:
+        user = auth.user_from_session(token)
+    except Exception:
+        user = None
+    if user:
+        st.session_state.user = user
+        st.session_state.session_token = token
+        if user.get("last_patient_id"):
+            st.session_state.current_patient_id = user["last_patient_id"]
 
 
 def _can(role: str) -> bool:
@@ -119,7 +214,7 @@ def render_login() -> None:
             password = st.text_input("Password", type="password", key="login_password")
             if st.form_submit_button("Sign in", type="primary", width="stretch"):
                 try:
-                    st.session_state.user = auth.login(email, password)
+                    _remember(auth.login(email, password))
                     st.rerun()
                 except auth.AuthError as e:
                     st.error(str(e))
@@ -135,7 +230,7 @@ def render_login() -> None:
             code = "" if first else st.text_input("Invite code", key="signup_code")
             if st.form_submit_button("Create account", type="primary", width="stretch"):
                 try:
-                    st.session_state.user = auth.signup(email, password, name, code or None)
+                    _remember(auth.signup(email, password, name, code or None))
                     st.rerun()
                 except auth.AuthError as e:
                     st.error(str(e))
@@ -151,7 +246,7 @@ def render_login() -> None:
             password = st.text_input("New password (at least 10 characters)", type="password", key="forgot_password")
             if st.form_submit_button("Set new password", width="stretch"):
                 try:
-                    st.session_state.user = auth.reset_password_with_secret(email, code, password)
+                    _remember(auth.reset_password_with_secret(email, code, password))
                     st.rerun()
                 except auth.AuthError as e:
                     st.error(str(e))
@@ -167,13 +262,19 @@ def render_sidebar() -> int | None:
         st.markdown(f"**{u['display_name']}**  \n{u['role']}")
         patients = db.list_patients(u)
         options = {p["id"]: p["name"] for p in patients}
-        current = st.session_state.get("current_patient_id")
+        current = st.session_state.get("current_patient_id") or u.get("last_patient_id")
         if current not in options:
             current = next(iter(options), None)
         if options:
             chosen = st.selectbox("Patient", list(options), index=list(options).index(current) if current else 0,
                                   format_func=lambda i: options[i], key="patient_select")
             st.session_state.current_patient_id = chosen
+            if chosen != u.get("last_patient_id"):
+                try:
+                    db.set_last_patient(u, chosen)
+                    st.session_state.user["last_patient_id"] = chosen
+                except Exception:
+                    pass
         else:
             st.session_state.current_patient_id = None
             st.caption("No patients yet. Add one on the Home page.")
@@ -194,8 +295,14 @@ def render_sidebar() -> int | None:
             st.warning("No model key configured. Uploads are stored but not extracted, and the board cannot run. "
                        "Set OPENAI_API_KEY.")
         if st.button("Sign out", width="stretch"):
-            for k in ("user", "current_patient_id", "conversation_id"):
+            try:
+                auth.end_session(st.session_state.get("session_token"))
+            except Exception:
+                pass
+            for k in ("user", "current_patient_id", "conversation_id", "session_token"):
                 st.session_state.pop(k, None)
+            st.session_state.signed_out = True
+            st.session_state.cookie_action = ("clear", None)
             st.rerun()
         st.caption(DISCLAIMER)
     return st.session_state.get("current_patient_id")
@@ -218,7 +325,7 @@ def page_home() -> None:
     due = appts.due_reminders(u)
     if due:
         for a in due:
-            st.warning(f"Reminder: {a['patient_name']}, {a['title']} on {_fmt(a['starts_at'])}"
+            st.warning(f"Reminder: {a['patient_name']}, {a['title']} on {_when(a["starts_at"])}"
                        + (f" with {a['doctor_name']}" if a.get("doctor_name") else ""))
     pid = _need_patient()
     if not pid:
@@ -249,7 +356,7 @@ def page_home() -> None:
         st.markdown("**Upcoming appointments**")
         if upcoming:
             for a in upcoming:
-                st.write(f"{_fmt(a['starts_at'])}: {a['title']}" + (f" with {a['doctor_name']}" if a.get("doctor_name") else ""))
+                st.write(f"{_when(a['starts_at'])}: {a['title']}" + (f" with {a['doctor_name']}" if a.get("doctor_name") else ""))
         else:
             st.caption("None scheduled.")
     with st.expander("Patient details", expanded=False):
@@ -698,26 +805,44 @@ def page_appointments() -> None:
     if not pid:
         return
     st.title("Appointments and tests")
+    tz = _tz()
+    st.caption(f"Times are shown in your device's timezone ({tz or 'UTC'}).")
+    patient = db.get_patient(pid, u) or {}
     rows = appts.list_appointments(pid, u)
-    upcoming = [a for a in rows if a["status"] == "scheduled" and a["starts_at"] >= datetime.now() - timedelta(hours=1)]
+    now_utc = datetime.utcnow()
+    upcoming = [a for a in rows if a["status"] == "scheduled" and a["starts_at"] >= now_utc - timedelta(hours=1)]
     past = [a for a in rows if a not in upcoming]
     st.subheader("Upcoming")
     if upcoming:
         for a in upcoming:
-            c1, c2, c3 = st.columns([4, 1, 1])
-            c1.write(f"**{_fmt(a['starts_at'])}** {a['title']}" + (f" with {a['doctor_name']}" if a.get("doctor_name") else "")
-                     + (f" ({a['specialty']})" if a.get("specialty") else "") + (f", {a['location']}" if a.get("location") else ""))
-            if _can("editor"):
-                if c2.button("Done", key=f"done_{a['id']}"):
-                    appts.update_appointment(a["id"], pid, u, status="completed")
-                    st.rerun()
-                if c3.button("Cancel", key=f"cancel_{a['id']}"):
-                    appts.update_appointment(a["id"], pid, u, status="cancelled")
-                    st.rerun()
+            a = dict(a, patient_name=patient.get("name"))
+            head = f"{_when(a['starts_at'])}: {a['title']}" + (f" with {a['doctor_name']}" if a.get("doctor_name") else "")
+            with st.expander(head, expanded=False):
+                if a.get("specialty") or a.get("location"):
+                    st.write(", ".join(x for x in (a.get("specialty"), a.get("location")) if x))
+                if a.get("notes"):
+                    st.caption(a["notes"])
+                st.markdown("**Add to a calendar**")
+                g, o, i = st.columns(3)
+                g.link_button("Google Calendar", appts.google_calendar_url(a), width="stretch")
+                o.link_button("Outlook", appts.outlook_calendar_url(a), width="stretch")
+                i.download_button("Apple or other (.ics)", appts.to_ics([a]), file_name=f"appointment-{a['id']}.ics",
+                                  mime="text/calendar", key=f"ics_{a['id']}", width="stretch")
+                w, d, c = st.columns(3)
+                w.link_button("Send on WhatsApp", appts.whatsapp_share_url(appts.share_text(a, tz)), width="stretch")
+                if _can("editor"):
+                    if d.button("Mark done", key=f"done_{a['id']}", width="stretch"):
+                        appts.update_appointment(a["id"], pid, u, status="completed")
+                        st.rerun()
+                    if c.button("Cancel it", key=f"cancel_{a['id']}", width="stretch"):
+                        appts.update_appointment(a["id"], pid, u, status="cancelled")
+                        st.rerun()
     else:
         st.caption("Nothing scheduled.")
-    if rows:
-        st.download_button("Download calendar (.ics)", appts.to_ics(upcoming or rows), file_name="appointments.ics", mime="text/calendar")
+    if upcoming:
+        st.download_button("Download all upcoming (.ics)", appts.to_ics([dict(a, patient_name=patient.get("name")) for a in upcoming]),
+                           file_name="appointments.ics", mime="text/calendar")
+        st.caption("On an iPhone, open the .ics file and tap Add to Calendar. Google and Outlook open pre-filled in the browser or app.")
     if _can("editor"):
         with st.form("add_appt", clear_on_submit=True):
             st.markdown("**Add an appointment or test**")
@@ -734,14 +859,14 @@ def page_appointments() -> None:
             notes = st.text_area("Notes")
             if st.form_submit_button("Add") and title.strip():
                 try:
-                    appts.add_appointment(pid, u, title.strip(), datetime.combine(day, tm), kind=kind, doctor_name=doctor or None,
+                    appts.add_appointment(pid, u, title.strip(), appts.from_local(day, tm, tz), kind=kind, doctor_name=doctor or None,
                                           specialty=spec or None, location=loc or None, reminder_minutes=int(rem), notes=notes or None)
                     st.rerun()
                 except Exception as e:
                     _denied(e)
     if past:
         with st.expander("Past and cancelled"):
-            st.dataframe(pd.DataFrame([{"When": _fmt(a["starts_at"]), "Title": a["title"], "Doctor": a.get("doctor_name") or "", "Status": a["status"]} for a in past]),
+            st.dataframe(pd.DataFrame([{"When": _when(a["starts_at"]), "Title": a["title"], "Doctor": a.get("doctor_name") or "", "Status": a["status"]} for a in past]),
                          hide_index=True, width="stretch")
 
 
@@ -826,7 +951,7 @@ def page_brief() -> None:
         return
     st.title("Pre-visit brief")
     rows = appts.list_appointments(pid, u, upcoming_only=True)
-    opts = {0: "General (all open questions)"} | {a["id"]: f"{_fmt(a['starts_at'])} {a['title']}" for a in rows}
+    opts = {0: "General (all open questions)"} | {a["id"]: f"{_when(a["starts_at"])} {a['title']}" for a in rows}
     chosen = st.selectbox("For which appointment?", list(opts), format_func=lambda i: opts[i])
     lang = st.radio("Language", list(LANGS), format_func=lambda k: LANGS[k], horizontal=True,
                     index=list(LANGS).index(u.get("language") or "en"))
@@ -955,6 +1080,10 @@ def main() -> None:
     except Exception as e:
         st.error(f"Database migration failed: {e}")
         return
+    _install_home_screen_support()
+    _cookie_js()
+    if not _user():
+        _restore_from_cookie()
     if not _user():
         render_login()
         return
