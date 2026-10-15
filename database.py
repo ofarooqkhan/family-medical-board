@@ -599,65 +599,148 @@ def update_doctor_agent(user: dict, agent_type: str, **fields) -> None:
 # Doctor memory (findings the board stores for later runs)
 # ---------------------------------------------------------------------------
 
-def save_doctor_memory(patient_id: int, user: dict, doctor_type: str, memory_type: str, content: str,
+# Memory layout (see memory.py for the reasoning):
+#   doctor_type "shared": the patient profile every specialist reads (facts,
+#     standing instructions from doctors); status active or superseded.
+#   doctor_type <agent>: that specialist's own episodic notes.
+#   doctor_type "family", patient_id NULL: lessons learned from the family's
+#     corrections, shown to every specialist for every patient.
+SHARED_AGENT = "shared"
+LESSON_AGENT = "family"
+
+
+def save_doctor_memory(patient_id: int | None, user: dict, doctor_type: str, memory_type: str, content: str,
                        importance: int = 5, source_file_id: int | None = None, source_run_id: int | None = None,
-                       source_consultation_id: int | None = None) -> int:
+                       source_consultation_id: int | None = None, category: str | None = None) -> int:
     """One agent remembers one thing about one patient. Every memory records
     who or what produced it so a wrong one can be traced and removed."""
     require_role(user, "viewer")
     with db_cursor(commit=True) as cur:
-        _assert_patient(cur, patient_id)
+        if patient_id is not None:
+            _assert_patient(cur, patient_id)
         cur.execute("""INSERT INTO doctor_memory (patient_id, doctor_type, memory_type, content, importance, source_file_id,
-                                                  source_run_id, source_consultation_id, created_by)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                    (patient_id, doctor_type, memory_type, content, importance, source_file_id, source_run_id,
-                     source_consultation_id, (user or {}).get("id")))
+                                                  source_run_id, source_consultation_id, created_by, category, status)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active') RETURNING id""",
+                    (patient_id, doctor_type, memory_type, content[:2000], importance, source_file_id, source_run_id,
+                     source_consultation_id, (user or {}).get("id"), category))
         return cur.fetchone()["id"]
 
 
 def get_doctor_memories(patient_id: int, user: dict, doctor_type: str | None = None, limit: int = 50):
+    """Active memories of one patient, most important first."""
     require_role(user, "viewer")
     with db_cursor() as cur:
         if doctor_type:
-            cur.execute("""SELECT * FROM doctor_memory WHERE patient_id = %s AND doctor_type = %s
+            cur.execute("""SELECT * FROM doctor_memory WHERE patient_id = %s AND doctor_type = %s AND status = 'active'
                            ORDER BY importance DESC, created_at DESC LIMIT %s""", (patient_id, doctor_type, limit))
         else:
-            cur.execute("""SELECT * FROM doctor_memory WHERE patient_id = %s
+            cur.execute("""SELECT * FROM doctor_memory WHERE patient_id = %s AND status = 'active'
                            ORDER BY importance DESC, created_at DESC LIMIT %s""", (patient_id, limit))
         return cur.fetchall()
 
 
-def list_doctor_memories(patient_id: int, user: dict, limit: int = 500):
+def list_doctor_memories(patient_id: int, user: dict, limit: int = 500, include_superseded: bool = True):
     """Every memory for a patient, newest first, for the Memory screen."""
     require_role(user, "viewer")
     with db_cursor() as cur:
-        cur.execute("""SELECT m.*, u.display_name AS created_by_name
-                       FROM doctor_memory m LEFT JOIN users u ON u.id = m.created_by
-                       WHERE m.patient_id = %s ORDER BY m.created_at DESC, m.id DESC LIMIT %s""", (patient_id, limit))
+        cur.execute(f"""SELECT m.*, u.display_name AS created_by_name
+                        FROM doctor_memory m LEFT JOIN users u ON u.id = m.created_by
+                        WHERE m.patient_id = %s {"" if include_superseded else "AND m.status = 'active'"}
+                        ORDER BY m.created_at DESC, m.id DESC LIMIT %s""", (patient_id, limit))
         return cur.fetchall()
 
 
+def get_lessons(user: dict, limit: int = 20):
+    """Family-wide lessons from corrections, newest first."""
+    require_role(user, "viewer")
+    with db_cursor() as cur:
+        cur.execute("""SELECT * FROM doctor_memory WHERE doctor_type = %s AND status = 'active'
+                       ORDER BY created_at DESC, id DESC LIMIT %s""", (LESSON_AGENT, limit))
+        return cur.fetchall()
+
+
+def _add_lesson(cur, user: dict, text: str, source_memory_id: int | None) -> int:
+    cur.execute("""INSERT INTO doctor_memory (patient_id, doctor_type, memory_type, content, importance, created_by, category, status)
+                   VALUES (NULL, %s, 'lesson', %s, 6, %s, 'correction', 'active') RETURNING id""",
+                (LESSON_AGENT, text[:2000], user["id"]))
+    return cur.fetchone()["id"]
+
+
+def delete_lesson(lesson_id: int, user: dict) -> None:
+    require_role(user, "editor")
+    with db_cursor(commit=True) as cur:
+        cur.execute("DELETE FROM doctor_memory WHERE id = %s AND doctor_type = %s", (lesson_id, LESSON_AGENT))
+        if cur.rowcount != 1:
+            raise PermissionError(f"no lesson {lesson_id}")
+        audit(cur, user, None, "memory.lesson_delete", "memory", lesson_id)
+
+
 def update_doctor_memory(memory_id: int, patient_id: int, user: dict, content: str, importance: int | None = None) -> None:
+    """The family corrects a note. The correction itself becomes a lesson
+    every specialist sees, so the same mistake is not repeated."""
     require_role(user, "editor")
     content = (content or "").strip()
     if not content:
         raise ValueError("memory text cannot be empty")
     with db_cursor(commit=True) as cur:
-        cur.execute("""UPDATE doctor_memory SET content = %s, importance = COALESCE(%s, importance), updated_at = CURRENT_TIMESTAMP,
-                       updated_by = %s WHERE id = %s AND patient_id = %s""", (content, importance, user["id"], memory_id, patient_id))
-        if cur.rowcount != 1:
+        cur.execute("SELECT doctor_type, content FROM doctor_memory WHERE id = %s AND patient_id = %s", (memory_id, patient_id))
+        old = cur.fetchone()
+        if old is None:
             raise PermissionError(f"no memory {memory_id} for patient {patient_id}")
+        cur.execute("""UPDATE doctor_memory SET content = %s, importance = COALESCE(%s, importance), updated_at = CURRENT_TIMESTAMP,
+                       updated_by = %s, last_confirmed_at = CURRENT_TIMESTAMP WHERE id = %s AND patient_id = %s""",
+                    (content, importance, user["id"], memory_id, patient_id))
+        if old["content"].strip() != content:
+            _add_lesson(cur, user, f"The family corrected a note from {old['doctor_type']}. It said: \"{old['content'][:300]}\". "
+                                   f"It should say: \"{content[:300]}\".", memory_id)
         audit(cur, user, patient_id, "memory.update", "memory", memory_id, {"content": content[:200], "importance": importance})
 
 
 def delete_doctor_memory(memory_id: int, patient_id: int, user: dict) -> None:
     require_role(user, "editor")
     with db_cursor(commit=True) as cur:
-        cur.execute("DELETE FROM doctor_memory WHERE id = %s AND patient_id = %s RETURNING doctor_type, content", (memory_id, patient_id))
+        cur.execute("DELETE FROM doctor_memory WHERE id = %s AND patient_id = %s RETURNING doctor_type, content, memory_type",
+                    (memory_id, patient_id))
         row = cur.fetchone()
         if row is None:
             raise PermissionError(f"no memory {memory_id} for patient {patient_id}")
+        if row["memory_type"] != "lesson":
+            _add_lesson(cur, user, f"The family removed a note from {row['doctor_type']} as wrong: \"{row['content'][:300]}\". "
+                                   "Do not state this again unless a new record shows it.", None)
         audit(cur, user, patient_id, "memory.delete", "memory", memory_id, {"doctor_type": row["doctor_type"], "content": row["content"][:200]})
+
+
+def confirm_doctor_memory(memory_id: int, patient_id: int, user: dict) -> None:
+    """The family marks a profile fact as still true today."""
+    require_role(user, "editor")
+    with db_cursor(commit=True) as cur:
+        cur.execute("UPDATE doctor_memory SET last_confirmed_at = CURRENT_TIMESTAMP WHERE id = %s AND patient_id = %s", (memory_id, patient_id))
+        if cur.rowcount != 1:
+            raise PermissionError(f"no memory {memory_id} for patient {patient_id}")
+        audit(cur, user, patient_id, "memory.confirm", "memory", memory_id)
+
+
+def supersede_doctor_memories(patient_id: int, user: dict, old_ids: list[int], new_id: int | None) -> int:
+    """Consolidation replaced older facts with a newer one. The old rows stay
+    (status superseded) so the family can see and restore them."""
+    require_role(user, "viewer")
+    if not old_ids:
+        return 0
+    with db_cursor(commit=True) as cur:
+        cur.execute("""UPDATE doctor_memory SET status = 'superseded', superseded_by = %s, updated_at = CURRENT_TIMESTAMP
+                       WHERE patient_id = %s AND id = ANY(%s) AND status = 'active' AND id <> COALESCE(%s, -1)""",
+                    (new_id, patient_id, list(old_ids), new_id))
+        return cur.rowcount
+
+
+def restore_doctor_memory(memory_id: int, patient_id: int, user: dict) -> None:
+    require_role(user, "editor")
+    with db_cursor(commit=True) as cur:
+        cur.execute("""UPDATE doctor_memory SET status = 'active', superseded_by = NULL, updated_at = CURRENT_TIMESTAMP, updated_by = %s
+                       WHERE id = %s AND patient_id = %s""", (user["id"], memory_id, patient_id))
+        if cur.rowcount != 1:
+            raise PermissionError(f"no memory {memory_id} for patient {patient_id}")
+        audit(cur, user, patient_id, "memory.restore", "memory", memory_id)
 
 
 def clear_doctor_memories(patient_id: int, user: dict, doctor_type: str | None = None) -> int:

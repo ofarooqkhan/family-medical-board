@@ -53,6 +53,8 @@ DEFAULT_MODELS = {
     "transcription": os.environ.get("MODEL_TRANSCRIPTION", "gpt-4o-transcribe-diarize"),
     "transcription_fallback": os.environ.get("MODEL_TRANSCRIPTION_FALLBACK", "gpt-4o-transcribe"),
     "summary": os.environ.get("MODEL_SUMMARY", "gpt-4o"),
+    # Profile consolidation after a board run: small and cheap.
+    "memory": os.environ.get("MODEL_MEMORY", "gpt-4o-mini"),
 }
 
 # USD per minute of audio. Unknown models get cost None, never a guess.
