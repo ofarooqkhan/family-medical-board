@@ -276,6 +276,11 @@ def update_user_settings(user: dict, *, display_name: str | None = None, languag
         audit(cur, user, None, "user.settings", "user", None, {"display_name": display_name, "language": language})
 
 
+def set_last_patient(user: dict, patient_id: int | None) -> None:
+    with db_cursor(commit=True) as cur:
+        cur.execute("UPDATE users SET last_patient_id = %s WHERE id = %s", (patient_id, user["id"]))
+
+
 def set_user_role(admin: dict, target_user_id: str, role: str) -> None:
     require_role(admin, "admin")
     if role not in ROLE_RANK:

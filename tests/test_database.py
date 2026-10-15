@@ -52,10 +52,10 @@ INSERT INTO doctor_agents (agent_type, display_name, role, goal, backstory)
 EXPECTED_TABLES = {
     "users", "patients", "conversations", "patient_files", "vitals_history", "doctor_agents", "doctor_memory",
     "chat_history", "alembic_version", "invites", "audit_log", "document_pages", "extracted_items", "medications",
-    "medication_changes", "appointments", "board_runs",
+    "medication_changes", "appointments", "board_runs", "sessions",
 }
 
-HEAD = "0004"
+HEAD = "0005"
 
 
 def _raw():
@@ -390,3 +390,40 @@ def test_pool_serves_more_threads_than_connections(migrated):
     for t in threads:
         t.join()
     assert errors == []
+
+
+def test_remembered_sign_in_sessions(accounts):
+    import auth
+    admin = accounts["admin"]
+    token = auth.create_session(admin)
+    assert auth.user_from_session(token)["id"] == admin["id"]
+    assert auth.user_from_session("not a token") is None
+    assert auth.user_from_session(None) is None
+    # Changing the password ends every remembered session.
+    auth.change_password(admin, "correct horse battery", "a brand new passphrase")
+    assert auth.user_from_session(token) is None
+    token2 = auth.create_session(auth.login("admin@example.com", "a brand new passphrase"))
+    assert auth.user_from_session(token2) is not None
+    auth.end_session(token2)
+    assert auth.user_from_session(token2) is None
+    # An expired session is ignored.
+    token3 = auth.create_session(admin, days=0)
+    with _raw() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE sessions SET expires_at = expires_at - interval '1 day'")
+        conn.commit()
+    assert auth.user_from_session(token3) is None
+    # A disabled account cannot be resumed.
+    token4 = auth.create_session(accounts["viewer"])
+    import database
+    database.set_user_active(admin, accounts["viewer"]["id"], False)
+    assert auth.user_from_session(token4) is None
+
+
+def test_last_patient_is_remembered_per_user(accounts, migrated):
+    import auth
+    admin = accounts["admin"]
+    pid = migrated.create_patient(admin, "Parent One")
+    migrated.set_last_patient(admin, pid)
+    assert auth.login("admin@example.com", "correct horse battery")["last_patient_id"] == pid
+    assert auth.user_from_session(auth.create_session(admin))["last_patient_id"] == pid

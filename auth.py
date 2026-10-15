@@ -10,6 +10,7 @@ replace this module behind the same two functions, login() and signup().
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import re
@@ -25,7 +26,7 @@ MIN_PASSWORD_LENGTH = 10
 INVITE_DAYS = 14
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-PUBLIC_USER_COLUMNS = "id, email, display_name, role, language, is_active, created_at, last_login_at"
+PUBLIC_USER_COLUMNS = "id, email, display_name, role, language, is_active, created_at, last_login_at, last_patient_id"
 
 
 def _utcnow() -> datetime:
@@ -131,6 +132,55 @@ def login(email: str, password: str) -> dict:
         return user
 
 
+# ---------------------------------------------------------------------------
+# Remembered sign-in (browser cookie backed by a sessions row)
+# ---------------------------------------------------------------------------
+
+SESSION_DAYS = 30
+SESSION_COOKIE = "fmb_session"
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def create_session(user: dict, days: int = SESSION_DAYS) -> str:
+    """Return a random token for the browser to keep. Only its hash is stored."""
+    token = secrets.token_urlsafe(32)
+    with db_cursor(commit=True) as cur:
+        cur.execute("INSERT INTO sessions (token_hash, user_id, expires_at, last_seen_at) VALUES (%s, %s, %s, %s)",
+                    (_token_hash(token), user["id"], _utcnow() + timedelta(days=days), _utcnow()))
+        cur.execute("DELETE FROM sessions WHERE expires_at < %s", (_utcnow(),))
+    return token
+
+
+def user_from_session(token: str | None) -> dict | None:
+    """The active user behind a remembered-sign-in token, or None."""
+    if not token:
+        return None
+    with db_cursor(commit=True) as cur:
+        cur.execute(f"""SELECT {", ".join("u." + c for c in PUBLIC_USER_COLUMNS.split(", "))}
+                        FROM sessions s JOIN users u ON u.id = s.user_id
+                        WHERE s.token_hash = %s AND s.expires_at >= %s AND u.is_active""",
+                    (_token_hash(token), _utcnow()))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cur.execute("UPDATE sessions SET last_seen_at = %s WHERE token_hash = %s", (_utcnow(), _token_hash(token)))
+        return dict(row)
+
+
+def end_session(token: str | None) -> None:
+    if not token:
+        return
+    with db_cursor(commit=True) as cur:
+        cur.execute("DELETE FROM sessions WHERE token_hash = %s", (_token_hash(token),))
+
+
+def end_all_sessions(cur, user_id: str) -> None:
+    cur.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+
+
 def change_password(user: dict, current_password: str, new_password: str) -> None:
     require_role(user, "viewer")
     if len(new_password or "") < MIN_PASSWORD_LENGTH:
@@ -142,6 +192,7 @@ def change_password(user: dict, current_password: str, new_password: str) -> Non
             raise AuthError("Current password is incorrect.")
         cur.execute("UPDATE users SET password_hash = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                     (hash_password(new_password), user["id"]))
+        end_all_sessions(cur, user["id"])
         audit(cur, user, None, "user.password")
 
 
@@ -169,6 +220,7 @@ def reset_password_with_secret(email: str, secret: str, new_password: str) -> di
         cur.execute(f"""UPDATE users SET password_hash = %s, is_active = TRUE, updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s RETURNING {PUBLIC_USER_COLUMNS}""", (hash_password(new_password), row["id"]))
         user = dict(cur.fetchone())
+        end_all_sessions(cur, user["id"])
         audit(cur, user, None, "user.password_reset_self")
         return user
 
@@ -182,6 +234,7 @@ def reset_password(admin: dict, target_user_id: str) -> str:
                     (hash_password(temp), target_user_id))
         if cur.rowcount != 1:
             raise AuthError("No such user.")
+        end_all_sessions(cur, target_user_id)
         audit(cur, admin, None, "user.password_reset", "user", None, {"user_id": target_user_id})
     return temp
 
