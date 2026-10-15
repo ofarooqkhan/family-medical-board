@@ -427,3 +427,22 @@ def test_last_patient_is_remembered_per_user(accounts, migrated):
     migrated.set_last_patient(admin, pid)
     assert auth.login("admin@example.com", "correct horse battery")["last_patient_id"] == pid
     assert auth.user_from_session(auth.create_session(admin))["last_patient_id"] == pid
+
+
+def test_upgrade_tolerates_a_schema_already_synced_by_the_host(db):
+    """Replit applies its own schema diff to production before the app starts,
+    so the tables and columns of 0004 to 0007 can already exist while
+    alembic_version still says 0003. Upgrading must then succeed."""
+    db.run_migrations()
+    conn = _raw()
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("UPDATE alembic_version SET version_num = '0003'")
+    cur.close()
+    conn.close()
+    assert db.migration_plan()["current_revision"] == "0003"
+    plan = db.run_migrations()
+    assert db.migration_plan()["current_revision"] == HEAD
+    assert _tables() == EXPECTED_TABLES
+    cols = {r[0] for r in _query("SELECT column_name FROM information_schema.columns WHERE table_name = 'doctor_memory'")}
+    assert {"source_run_id", "source_consultation_id", "created_by", "updated_at", "updated_by"} <= cols

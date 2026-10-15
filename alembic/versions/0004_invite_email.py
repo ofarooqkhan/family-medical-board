@@ -16,9 +16,29 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _insp():
+    from sqlalchemy import inspect
+    return inspect(op.get_bind())
+
+
+def _has_table(name: str) -> bool:
+    return name in _insp().get_table_names()
+
+
+def _has_column(table: str, column: str) -> bool:
+    return any(c["name"] == column for c in _insp().get_columns(table))
+
+
+def _has_index(table: str, name: str) -> bool:
+    return any(i["name"] == name for i in _insp().get_indexes(table))
+
+
 def upgrade() -> None:
-    op.add_column("invites", sa.Column("email", sa.String(255)))
-    op.add_column("invites", sa.Column("note", sa.String(255)))
+    # Guards: a hosted schema sync (Replit) may have added these already.
+    if not _has_column("invites", "email"):
+        op.add_column("invites", sa.Column("email", sa.String(255)))
+    if not _has_column("invites", "note"):
+        op.add_column("invites", sa.Column("note", sa.String(255)))
 
 
 def downgrade() -> None:
