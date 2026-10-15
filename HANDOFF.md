@@ -660,6 +660,16 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0n Round 10: medication lists and an explained empty result (2026-10-15)
+The owner uploaded a screenshot of a medicine table (brand and generic
+names, doses, status remarks) and the app found nothing. Fixes: a new
+document kind `medication_list` mapped to the prescription schema with
+its own focus text and classifier guidance; a generic document that
+mentions medicines gets a second read as a medication list; the upload
+summary states what the model read it as; the All documents entry has a
+"Read it as" selector next to "Extract again". The exact failure text on
+the owner's side was not available; the owner was asked to paste it.
+
 ### 8.0m Round 8 live (2026-10-15)
 The owner republished; deployment success, health ok, production
 database at 0008 with the four new doctor_memory columns. The live site

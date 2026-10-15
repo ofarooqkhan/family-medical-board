@@ -33,7 +33,7 @@ from providers import ProviderError, get_provider
 APP_TITLE = "Family Medical Board"
 DISCLAIMER = "This app keeps records and lists questions for the treating doctors. It never gives medical advice."
 KINDS = {"auto": "Detect automatically", "prescription": "Prescription", "lab_report": "Lab report",
-         "imaging_report": "Imaging report", "vitals_log": "Readings log (BP, sugar, weight)",
+         "imaging_report": "Imaging report", "vitals_log": "Readings log (BP, sugar, weight)", "medication_list": "Medication list or table",
          "discharge_summary": "Discharge summary or letter", "consultation_audio": "Doctor conversation (audio)",
          "other": "Other"}
 LANGS = {"en": "English", "ur": "Urdu"}
@@ -468,7 +468,7 @@ def _note_upload(name: str, out: dict) -> None:
     """Keep what an upload did so the summary survives the rerun."""
     st.session_state.setdefault("upload_summaries", []).append({
         "name": name, "added": out.get("added") or [], "to_check": out.get("to_check") or [],
-        "error": out.get("error"), "kind": out.get("kind"), "pages": out.get("pages"),
+        "error": out.get("error"), "kind": out.get("kind"), "pages": out.get("pages"), "read_as": out.get("read_as"),
     })
 
 
@@ -492,8 +492,11 @@ def _show_upload_summaries() -> None:
                 st.markdown("Needs a look before it joins the record (the model was not sure):")
                 for x in n["to_check"]:
                     st.markdown(f"- {x}")
+            if n.get("read_as"):
+                st.caption(f"The model read it as: {n['read_as']}.")
             if not n["added"] and not n["to_check"]:
-                st.caption("Nothing to add was found on these pages.")
+                st.warning("Nothing to add was found on these pages. If this is a medicine list, open it under All documents, "
+                           "choose 'Medication list or table' and press 'Extract again'.")
     if st.button("Dismiss", key="dismiss_upload_summaries"):
         st.session_state.pop("upload_summaries", None)
         st.rerun()
@@ -652,13 +655,15 @@ def _document_list(pid: int, provider) -> None:
             if full and full.get("file_data"):
                 st.download_button("Download original", bytes(full["file_data"]), file_name=d["filename"], key=f"dl_{d['id']}")
             if _can("editor"):
-                b1, b2 = st.columns(2)
-                if provider is not None and b1.button("Extract again", key=f"re_{d['id']}"):
+                b0, b1, b2 = st.columns([2, 1, 1])
+                kind_pick = b0.selectbox("Read it as", list(KINDS), format_func=lambda k: KINDS[k], key=f"kind_{d['id']}",
+                                         label_visibility="collapsed")
+                if provider is not None and b1.button("Extract again", key=f"re_{d['id']}", width="stretch"):
                     with st.spinner("Reading again..."):
-                        out = documents.run_extraction(pid, d["id"], u, provider, kind=None)
+                        out = documents.run_extraction(pid, d["id"], u, provider, kind=None if kind_pick == "auto" else kind_pick)
                     _note_upload(d["filename"], out)
                     st.rerun()
-                if b2.button("Delete document", key=f"del_{d['id']}"):
+                if b2.button("Delete document", key=f"del_{d['id']}", width="stretch"):
                     db.delete_document(d["id"], pid, u)
                     st.rerun()
 
