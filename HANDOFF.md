@@ -660,6 +660,12 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0j Round 9 live (2026-10-15)
+`fe4f4b9` synced and republished from the connector; deployment running.
+Still open: the memory redesign (task 19), waiting on the owner's answers
+to the five questions in the chat (scope of lessons, approval step,
+retention, embeddings, standing instructions from conversations).
+
 ### 8.0i Round 9: automatic adding, straightening, request size (2026-10-15)
 Owner's first live upload (a multi-page scanned PDF) failed with HTTP 413
 "Body buffer overflow" from the Replit OpenAI gateway: twelve full
