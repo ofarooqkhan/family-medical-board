@@ -39,23 +39,28 @@ def _schema_response(schema_name: str, parts: list[Part]) -> dict[str, Any]:
                 "summary": "Demo mode: the document was stored but not read.", "facts": [], "medications_mentioned": []}
     if schema_name == "RoutingDecision":
         return {"agents": ["general_duty"], "reason": "demo"}
-    if schema_name == "SpecialistOutput":
-        agent = "specialist"
-        for line in text.splitlines():
-            pass
-        return {"agent_type": agent, "summary": "(demo) The records on file were listed in the context; no model read them.",
+    if schema_name == "TriageDecision":
+        return {"assignments": [{"agent_type": "general_duty", "question": "(demo) What do the records show?"}],
+                "direct_answer": None, "reason": "demo mode: no model key configured"}
+    if schema_name == "SpecialistFindings":
+        return {"agent_type": "specialist", "summary": "(demo) The records on file were listed in the context; no model read them.",
                 "observations": [{"text": "(demo) This is placeholder output. Add a model key to get real summaries.",
                                   "category": "other", "sources": [{"file_id": None, "page": None, "label": "demo"}], "confidence": 0.1}],
-                "questions_for_doctor": [{"question": "(demo) Is the current medication list complete?", "for_doctor": "treating doctor",
-                                          "why": "demo", "priority": "low"}],
                 "missing_records": [], "cross_domain_flags": [], "declined_advice_request": False, "decline_note": None, "confidence": 0.1}
+    if schema_name == "DiscussionTurn":
+        return {"agent_type": "specialist", "responses": [], "added_observations": [],
+                "questions_for_doctor": [{"question": "(demo) Is the current medication list complete?", "for_doctor": "treating doctor",
+                                          "why": "demo", "priority": "low", "based_on": "(demo) placeholder output"}],
+                "confidence": 0.1}
     if schema_name == "CoordinatorOutput":
         return {"headline": "(demo) Placeholder brief: no model key is configured.",
                 "what_changed": ["(demo) Nothing was analyzed."],
                 "key_observations": [{"text": "(demo) Add OPENAI_API_KEY to get real output.", "category": "other",
                                       "sources": [{"file_id": None, "page": None, "label": "demo"}], "confidence": 0.1}],
                 "questions_by_doctor": [{"doctor": "Treating doctor", "questions": ["(demo) Is the medication list complete?"]}],
-                "missing_records": [], "disagreements": [], "declined_advice_request": False, "decline_note": None}
+                "missing_records": [], "disagreements": [], "declined_advice_request": False, "decline_note": None,
+                "open_items": [{"text": "(demo) Is the medication list complete?", "doctor": "Treating doctor", "status": "open",
+                                "since_run_id": None}]}
     if schema_name == "ConsultationSummary":
         return {"title": "(demo) Diabetes review with Dr. Demo", "language": "en", "happened_on": None,
                 "doctor_name": "Dr. Demo", "doctor_specialty": "Endocrinology", "doctor_confidence": 0.6,

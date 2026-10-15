@@ -7,9 +7,8 @@ import pytest
 
 import board
 import memory
-from board import CoordinatorOutput, SpecialistOutput
 from providers import FakeProvider
-from tests.test_board import COORD, _specialist_response
+from tests.test_board import RESPONSES
 
 pytestmark = pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set")
 
@@ -64,7 +63,7 @@ def test_consolidation_updates_the_profile_and_keeps_history(accounts, migrated)
         {"text": "Type 2 diabetes, followed by Dr. Khan (endocrinology)", "category": "diagnosis", "importance": 8, "replaces_ids": []},
         {"text": "HbA1c 7.8 percent in September 2026", "category": "baseline", "importance": 6, "replaces_ids": []},  # duplicate, dropped
     ], "contradictions": ["The lab report lists the patient's age as 81, the profile says 79."], "unchanged": False}
-    fake = FakeProvider(responses={SpecialistOutput: _specialist_response, CoordinatorOutput: COORD, memory.ProfileUpdate: update})
+    fake = FakeProvider(responses={**RESPONSES, memory.ProfileUpdate: update})
     run = board.run_board(pid, editor, "What do the latest records show about his diabetes?", fake)
     cons = run["consolidation"]
     assert cons["error"] is None and len(cons["added"]) == 2 and cons["superseded"] == 1
@@ -89,7 +88,7 @@ def test_consolidation_updates_the_profile_and_keeps_history(accounts, migrated)
 def test_consolidation_failure_does_not_lose_the_run(accounts, migrated):
     admin, editor = accounts["admin"], accounts["editor"]
     pid = migrated.create_patient(admin, "Parent One")
-    fake = FakeProvider(responses={SpecialistOutput: _specialist_response, CoordinatorOutput: COORD})  # no ProfileUpdate
+    fake = FakeProvider(responses=dict(RESPONSES))  # no ProfileUpdate
     run = board.run_board(pid, editor, "What do the records show about blood pressure?", fake)
     assert run["status"] == "done" and run["consolidation"]["error"]
     assert memory.profile(pid, editor) == []

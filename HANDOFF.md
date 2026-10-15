@@ -106,12 +106,14 @@ app with a basic layer first, then deep dive into orchestration and iterate.
   invite codes with role, `audit_log` on every write, admin screens for
   people and invites. Clerk dropped at the owner's request.
 - Item 7: `api.py` FastAPI over the same service functions, bearer tokens.
-- Items 8, 9, 10, 11: `board.py`. Shared `SpecialistOutput` schema; pharmacist
-  gets deterministic duplicate and multi-prescriber flags from
-  `medications.find_duplicates`; keyword routing with whole-word domains,
-  small-model router as fallback, full review on request; `board_runs` logs
-  calls, tokens, cost; `detect_advice_request` plus output scrubbing;
-  twenty advice prompts in `tests/test_board.py` all declined.
+- Items 8, 9, 10, 11: `board.py`. Runs as a multidisciplinary meeting
+  (round 11, section 8.0p): chair triage, per-role record slices, findings,
+  a discussion round, chair synthesis with plan state carried between runs.
+  Pharmacist gets deterministic duplicate and multi-prescriber flags from
+  `medications.find_duplicates`; keyword routing with whole-word domains is
+  the fallback when the chair call fails; `board_runs` logs calls, tokens,
+  cost; `detect_advice_request` plus output scrubbing; twenty advice
+  prompts in `tests/test_board.py` all declined.
 - Items 12, 13, 14: `appointments.py` (reminders, ICS), `brief.py`
   (markdown and PDF, English or Urdu labels), per-user language setting
   applied to board output and briefs.
@@ -659,6 +661,60 @@ the hosted Postgres (`2220bc6`, ping plus keepalives). Keep the workspace
 and main in step by pulling main in the Repl before each publish. Creating new Repls needs a subscription
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
+
+### 8.0p Round 11: the board runs as a meeting (2026-10-15)
+Owner's finding: the specialists asked a fixed-feeling batch of irrelevant
+questions. Cause: no agent heard another, every specialist got the same
+24k-char record dump with "review everything in your domain", the schema
+forced a questions list on every call, and the brief collected questions
+from the last ten runs. The owner asked for the orchestration a real
+multidisciplinary board uses, and for the Board page to read as one
+conversation. `board.py` was rewritten around four stages:
+1. Triage by the chair (`triage`, router model, purpose `triage`): reads the
+   question, the conversation so far, the record index (no document bodies)
+   and the open items from the last review; returns one assignment per
+   specialist, each with the single question it must answer, or a
+   `direct_answer` for a record lookup (which documents are on file, what
+   the list says), in which case nobody is convened. Chair failure falls
+   back to `route()` (keyword match, then the small router).
+   `force_all` convenes everyone without a model call.
+2. Workup by role (`run_findings`, schema `SpecialistFindings`): each
+   specialist works from `slice_record`: the shared index, medication
+   list, latest values and profile, plus only the document bodies its
+   domain keywords match (radiologist always gets imaging reports,
+   pharmacist prescriptions and medication lists, discharge summaries go
+   to everyone, general duty and geriatrician read all). Findings only; no
+   questions at this stage.
+3. Discussion (`run_discussion`, schema `DiscussionTurn`, purpose
+   `discussion:<agent>`): each specialist reads the others' findings and
+   replies agree, disagree or add, then writes its questions, each with
+   `based_on` naming the finding it rests on. One specialist alone still
+   gets this turn (it is where questions are written), with no peers.
+4. Synthesis (`run_coordinator`): answers the family's question first, lists
+   disagreements from the stances, keeps only questions tied to a finding,
+   and returns `open_items`: every previous item marked answered,
+   superseded or open, plus the kept questions. `_carry_items` completes
+   what the chair left out and stamps new items with the run id.
+   `previous_open_items` feeds the next run; the brief reads the latest
+   run's open items instead of ten runs' questions.
+Conversation: `conversation_turns` passes the earlier turns (footer and
+redirect lines stripped, 800 chars each) to triage, discussion and
+synthesis; findings calls get records and the chair's question only.
+`run["turn"]` counts earlier board replies; `format_markdown` renders the
+first reply with the heading, missing-records list and footer, later
+replies as plain chat (the cost moves to a caption). Stored per run in
+`routed_agents`: assignments, turn, direct flag; in `specialist_outputs`:
+`assigned_question` and `discussion`; in `coordinator_output`:
+`open_items`. New fields default to None (the OpenAI strict schema rejects
+any other default; checked with `to_strict_json_schema`). No migration:
+all of it lives in the existing JSONB columns, old rows still render.
+Calls per run: 1 triage + 2 per specialist + 1 synthesis (+ 1 memory
+consolidation); a record lookup is 1 call. Tests: `tests/test_board.py`
+covers triage and its fallbacks, slicing per role, first-reply versus
+follow-up rendering, continuity and plan state across three runs, and the
+direct-answer path; 152 tests pass; demo-mode smoke passes. Not yet done
+with a real key: a live run to tune the four prompts (section 8.0's note
+on the pharmacist flagging advice on its own still applies).
 
 ### 8.0o Round 10 live (2026-10-15)
 `64f99bc` synced and republished from the connector; deployment running.

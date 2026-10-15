@@ -78,25 +78,32 @@ def build_brief(patient_id: int, user: dict, appointment_id: int | None = None, 
     docs = [d for d in db.list_documents(patient_id, user) if d["uploaded_at"] and d["uploaded_at"] >= since]
     pending = sum(len(v) for v in __import__("documents").pending_review(patient_id, user).values())
 
+    # The open items are the plan state the latest review left: every earlier
+    # question is already in it as open, answered or superseded.
     questions: list[dict[str, Any]] = []
     missing: list[str] = []
     seen = set()
-    for run in board.list_runs(patient_id, user, limit=10):
+    for run in board.list_runs(patient_id, user, limit=5):
         co = run.get("coordinator_output") or {}
         if isinstance(co, str):
             co = json.loads(co)
-        for group in co.get("questions_by_doctor", []):
-            doc = (group.get("doctor") or "").lower()
-            relevant = _doctor_matches(doc, specialty, doctor_name)
-            for q in group.get("questions", []):
-                key = q.strip().lower()
-                if key in seen or not relevant:
-                    continue
-                seen.add(key)
-                questions.append({"doctor": group.get("doctor"), "question": q, "run_id": run["id"], "date": _d(run["created_at"])[:10]})
-        for m in co.get("missing_records", []):
-            if m not in missing:
-                missing.append(m)
+        if not co:
+            continue
+        items = co.get("open_items")
+        if items is None:  # a run from before plan state existed
+            items = [{"text": q, "doctor": g.get("doctor"), "status": "open", "since_run_id": run["id"]}
+                     for g in co.get("questions_by_doctor", []) for q in g.get("questions", [])]
+        for item in items:
+            key = (item.get("text") or "").strip().lower()
+            if item.get("status") != "open" or not key or key in seen:
+                continue
+            if not _doctor_matches((item.get("doctor") or "").lower(), specialty, doctor_name):
+                continue
+            seen.add(key)
+            questions.append({"doctor": item.get("doctor"), "question": item["text"], "run_id": item.get("since_run_id") or run["id"],
+                              "date": _d(run["created_at"])[:10]})
+        missing = [m for m in co.get("missing_records", []) if m]
+        break
 
     memories = [m for m in db.get_doctor_memories(patient_id, user, limit=40) if m["doctor_type"] != db.SHARED_AGENT][:8]
     import memory as memory_mod

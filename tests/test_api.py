@@ -18,12 +18,10 @@ def client(accounts, monkeypatch):
     from fastapi.testclient import TestClient
     import api
     from extraction import LabReportDocument
-    from board import CoordinatorOutput, SpecialistOutput
     from providers import FakeProvider
-    from tests.test_board import COORD, _specialist_response
+    from tests.test_board import RESPONSES
     from tests.test_documents import LAB
-    api.PROVIDER_OVERRIDE = FakeProvider(responses={LabReportDocument: LAB, SpecialistOutput: _specialist_response,
-                                                    CoordinatorOutput: COORD})
+    api.PROVIDER_OVERRIDE = FakeProvider(responses={LabReportDocument: LAB, **RESPONSES})
     yield TestClient(api.app)
     api.PROVIDER_OVERRIDE = None
 

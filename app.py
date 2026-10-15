@@ -1149,6 +1149,10 @@ def page_board() -> None:
                     return
             md = board.format_markdown(run)
             st.markdown(md)
+            if run.get("turn"):  # later replies read as chat; the cost line becomes a caption
+                cost = run.get("estimated_cost_usd")
+                st.caption(f"{', '.join(run.get('routed_agents') or []) or 'chair only'}"
+                           + (f", ${cost:.4f}" if cost is not None else ""))
             if run.get("errors"):
                 st.warning("; ".join(run["errors"]))
         db.save_chat_message(pid, conv_id, u, "assistant", md, responding_doctor="coordinator",
@@ -1181,17 +1185,24 @@ def _run_detail(run: dict | None) -> None:
 
     routed = _j(run.get("routed_agents"))
     st.markdown(f"**Question:** {run['query']}")
-    st.caption(f"Routed to {', '.join(routed.get('agents', []))}. {routed.get('reason') or ''}")
+    agents = ", ".join(routed.get("agents", [])) or "nobody (the chair answered from the record index)"
+    st.caption(f"Chair's triage: {agents}. {routed.get('reason') or ''}")
     if run.get("error"):
         st.warning(run["error"])
     for o in _j(run.get("specialist_outputs")) or []:
         with st.container(border=True):
             st.markdown(f"**{o.get('agent_type', '').replace('_', ' ').title()}** (confidence {o.get('confidence', 0):.0%})")
+            if o.get("assigned_question"):
+                st.caption(f"Asked by the chair: {o['assigned_question']}")
             st.write(o.get("summary", ""))
             for ob in o.get("observations", []):
                 st.markdown(f"- {ob.get('text')}")
+            if o.get("discussion"):
+                st.markdown("_In discussion_")
+                for r in o["discussion"]:
+                    st.markdown(f"- {r.get('stance')} with {r.get('to', '').replace('_', ' ')}: {r.get('text')}")
             for q in o.get("questions_for_doctor", []):
-                st.markdown(f"- Ask {q.get('for_doctor')}: {q.get('question')}")
+                st.markdown(f"- Ask {q.get('for_doctor')}: {q.get('question')}" + (f" _(rests on: {q['based_on']})_" if q.get("based_on") else ""))
             if o.get("missing_records"):
                 st.caption("Missing: " + ", ".join(o["missing_records"]))
             if o.get("declined_advice_request"):
@@ -1199,13 +1210,20 @@ def _run_detail(run: dict | None) -> None:
     co = _j(run.get("coordinator_output"))
     if co:
         with st.container(border=True):
-            st.markdown(f"**Coordinator:** {co.get('headline', '')}")
+            st.markdown(f"**Chair's synthesis:** {co.get('headline', '')}")
             for x in co.get("what_changed", []):
                 st.markdown(f"- {x}")
             for g in co.get("questions_by_doctor", []):
                 st.markdown(f"**For {g.get('doctor')}**")
                 for q in g.get("questions", []):
                     st.markdown(f"- {q}")
+            for d in co.get("disagreements", []):
+                st.markdown(f"- Differ: {d}")
+            if co.get("open_items"):
+                st.markdown("**Plan state after this review**")
+                for i in co["open_items"]:
+                    st.markdown(f"- {i.get('status')}: {i.get('text')} _({i.get('doctor')}"
+                                + (f", since run {i['since_run_id']}" if i.get("since_run_id") else "") + ")_")
     calls = _j(run.get("model_calls")) or []
     if calls:
         st.dataframe(pd.DataFrame([{"Purpose": c.get("purpose"), "Model": c.get("model"), "In": c.get("input_tokens"),
