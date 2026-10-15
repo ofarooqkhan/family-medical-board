@@ -16,7 +16,7 @@ import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 import consultations
-from providers import DEFAULT_MODELS, OpenAIProvider, ProviderError
+from providers import DEFAULT_MODELS, OpenAIProvider, ProviderError, get_provider
 
 SCRIPT = (
     "Doctor: Good morning. I looked at the blood pressure readings you brought. They are still high, around one fifty over ninety. "
@@ -28,6 +28,59 @@ SCRIPT = (
 )
 
 
+def ingest_round_trip(p, provider, audio: bytes) -> None:
+    """The whole Conversations flow against DATABASE_URL: temporary account and
+    patient, ingest the recording, show the stored record and the pending
+    items, confirm the medication item, then delete everything created."""
+    import secrets
+
+    import auth
+    import database as db
+    import documents
+    import medications
+
+    p("step: ingest through the app (temporary account and patient, removed afterwards)")
+    db.run_migrations()
+    email = f"livecheck-{secrets.token_hex(3)}@example.invalid"
+    if auth.is_first_user():
+        user = auth.signup(email, secrets.token_urlsafe(16), "Live Check")
+    else:
+        with db.db_cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE role = 'admin' AND password_hash IS NOT NULL ORDER BY created_at LIMIT 1")
+            admin = cur.fetchone()
+        inv = auth.create_invite(dict(admin), "admin")
+        user = auth.signup(email, secrets.token_urlsafe(16), "Live Check", inv["code"])
+    pid = None
+    try:
+        pid = db.create_patient(user, "ZZ Live Check (delete me)", age=79)
+        out = consultations.ingest_audio(pid, user, "visit.wav", "audio/wav", audio, provider)
+        p(f"ingest: error={out.get('error')} items={out.get('items')} duration_ms={out.get('duration_ms')}")
+        if out.get("error"):
+            raise RuntimeError(out["error"])
+        c = consultations.get_consultation(out["consultation_id"], pid, user)
+        p(f"stored: status={c['status']} title={c['title']!r} doctor={c['doctor_name']!r} specialty={c['specialty']!r} "
+          f"happened_on={c['happened_on']} model={c['transcription_model']} cost={c['cost_usd']}")
+        pending = documents.pending_review(pid, user).get(c["file_id"], [])
+        for it in pending:
+            pl = it["payload"]
+            p(f"  pending {it['item_type']}: {pl.get('name') or pl.get('title')} {pl.get('dose') or ''} {pl.get('frequency') or ''} conf {it['confidence']:.2f}")
+        for it in pending:
+            if it["item_type"] == "medication":
+                documents.confirm_item(it["id"], pid, user, it["payload"])
+        meds = medications.list_medications(pid, user, status="active")
+        p(f"medications after confirmation: {[(m['name'], m.get('dose'), m.get('prescriber')) for m in meds]}")
+        mems = db.list_doctor_memories(pid, user)
+        p(f"memories written: {[(m['doctor_type'], m['memory_type']) for m in mems]}")
+        actions = sorted({r['action'] for r in db.get_audit_log(pid)})
+        p(f"audit actions: {actions}")
+    finally:
+        if pid is not None:
+            db.delete_patient(pid, user) if user.get("role") == "admin" else None
+        with db.db_cursor(commit=True) as cur:
+            cur.execute("DELETE FROM users WHERE email = %s", (email,))
+        p("cleanup done")
+
+
 def main() -> int:
     out = []
 
@@ -36,15 +89,18 @@ def main() -> int:
         out.append(str(s))
 
     t0 = time.time()
-    provider = OpenAIProvider()
-    client = provider._client
-    p("step: text to speech")
-    try:
-        speech = client.audio.speech.create(model="gpt-4o-mini-tts", voice="alloy", input=SCRIPT, response_format="mp3")
-        audio = speech.content if hasattr(speech, "content") else speech.read()
-    except Exception as e:
-        p(f"tts failed: {type(e).__name__}: {e}")
-        audio = None
+    provider = get_provider() if os.environ.get("MODEL_PROVIDER") else OpenAIProvider()
+    p(f"provider: {provider.name}")
+    audio = None
+    client = getattr(provider, "_client", None)
+    if client is not None and not os.environ.get("TRANSCRIBE_CHECK_AUDIO"):
+        p("step: text to speech")
+        try:
+            speech = client.audio.speech.create(model="gpt-4o-mini-tts", voice="alloy", input=SCRIPT, response_format="mp3")
+            audio = speech.content if hasattr(speech, "content") else speech.read()
+        except Exception as e:
+            p(f"tts failed: {type(e).__name__}: {e}")
+            audio = None
     if not audio:
         clip = os.environ.get("TRANSCRIBE_CHECK_AUDIO")
         if clip and os.path.exists(clip):
@@ -98,6 +154,8 @@ def main() -> int:
     }, indent=1, ensure_ascii=False))
     items = consultations.items_from_summary(summary)
     p(f"pending items that would be queued: {[(i['item_type'], i['payload'].get('name') or i['payload'].get('title')) for i in items]}")
+    if "--ingest" in sys.argv:
+        ingest_round_trip(p, provider, audio)
     p(f"ALL STEPS OK in {time.time() - t0:.0f}s")
     if len(sys.argv) > 1:
         with open(sys.argv[1], "w", encoding="utf-8") as fh:
