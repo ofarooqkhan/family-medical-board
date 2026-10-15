@@ -20,9 +20,11 @@ import appointments as appts
 import auth
 import board
 import brief as brief_mod
+import consultations
 import database as db
 import documents
 import medications as meds
+import ui
 import values_import
 from extraction import parse_date, rows_from_vital_payload as extraction_rows
 from providers import ProviderError, get_provider
@@ -31,7 +33,8 @@ APP_TITLE = "Family Medical Board"
 DISCLAIMER = "This app keeps records and lists questions for the treating doctors. It never gives medical advice."
 KINDS = {"auto": "Detect automatically", "prescription": "Prescription", "lab_report": "Lab report",
          "imaging_report": "Imaging report", "vitals_log": "Readings log (BP, sugar, weight)",
-         "discharge_summary": "Discharge summary or letter", "other": "Other"}
+         "discharge_summary": "Discharge summary or letter", "consultation_audio": "Doctor conversation (audio)",
+         "other": "Other"}
 LANGS = {"en": "English", "ur": "Urdu"}
 
 
@@ -200,6 +203,7 @@ def _fmt(v) -> str:
 
 def render_login() -> None:
     st.title(APP_TITLE)
+    st.markdown("One calm place for a family to keep a parent's medical record, prepare for visits, and stay in step with the doctors.")
     st.caption(DISCLAIMER)
     first = auth.is_first_user()
     invite_param = (st.query_params.get("invite") or "").strip()
@@ -319,28 +323,46 @@ def _need_patient() -> int | None:
 # Home
 # ---------------------------------------------------------------------------
 
+def _greeting() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        hour = datetime.now(ZoneInfo(_tz() or "UTC")).hour
+    except Exception:
+        hour = datetime.now().hour
+    return "Good morning" if hour < 12 else ("Good afternoon" if hour < 17 else "Good evening")
+
+
 def page_home() -> None:
     u = _user()
-    st.title(APP_TITLE)
+    first_name = (u.get("display_name") or "").split(" ")[0]
+    st.title(f"{_greeting()}, {first_name}" if first_name else _greeting())
     due = appts.due_reminders(u)
     if due:
         for a in due:
-            st.warning(f"Reminder: {a['patient_name']}, {a['title']} on {_when(a["starts_at"])}"
+            st.warning(f"Coming up: {a['patient_name']}, {a['title']} on {_when(a["starts_at"])}"
                        + (f" with {a['doctor_name']}" if a.get("doctor_name") else ""))
     pid = _need_patient()
     if not pid:
+        st.caption("Start by adding the person you care for, in the side panel.")
         return
     patient = db.get_patient(pid, u)
-    st.subheader(patient["name"])
-    c1, c2, c3, c4 = st.columns(4)
     pending = sum(len(v) for v in documents.pending_review(pid, u).values())
-    c1.metric("Items awaiting review", pending)
-    c2.metric("Active medications", len(meds.list_medications(pid, u, status="active")))
-    c3.metric("Documents", len(db.list_documents(pid, u)))
+    active = meds.list_medications(pid, u, status="active")
+    docs = db.list_documents(pid, u)
     upcoming = appts.list_appointments(pid, u, upcoming_only=True, limit=5)
-    c4.metric("Upcoming appointments", len(upcoming))
+    st.subheader(f"Looking after {patient['name']}")
     if pending:
-        st.info(f"{pending} extracted items are waiting for someone to check them against the original. Open Documents.")
+        st.info(f"{pending} things were read from documents and are waiting for a quick check. Nothing is saved until you confirm it. "
+                "Open Documents when you have a minute.")
+    elif not docs and not active:
+        st.success("A clean start. Add a prescription photo on Medications, or a lab report on Documents, and the record builds itself.")
+    else:
+        st.success("Everything is in order. Nothing is waiting for you.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("To check", pending)
+    c2.metric("Medicines in use", len(active))
+    c3.metric("Documents kept", len(docs))
+    c4.metric("Visits ahead", len(upcoming))
     col_a, col_b = st.columns(2)
     with col_a:
         st.markdown("**Latest values**")
@@ -477,6 +499,13 @@ def _review_items(pid: int, grouped: dict) -> None:
                 with left:
                     if page and page.get("image_png"):
                         st.image(bytes(page["image_png"]), caption=f"Page {it.get('page_number') or 1}", width="stretch")
+                    elif doc.get("document_kind") == "consultation_audio":
+                        st.caption("From a doctor conversation. Listen again if a field looks wrong.")
+                        full = db.get_document(file_id, pid, u, with_data=True)
+                        if full and full.get("file_data"):
+                            st.audio(bytes(full["file_data"]), format=full.get("mime_type") or "audio/mpeg")
+                        if p_change := it["payload"].get("change"):
+                            st.caption(f"Said as: {p_change}" + (f", reason: {it['payload']['reason']}" if it["payload"].get("reason") else ""))
                     else:
                         st.caption("No page image.")
                 with right:
@@ -524,6 +553,12 @@ def _item_editor(it: dict, pid: int, editable: bool) -> None:
                 new["unit"] = st.text_input("Unit", p.get("unit") or "", key=f"{key}_unit") or None
             new["recorded_at"] = st.text_input("Date and time as written" + (" (unsure)" if "recorded_at" in low else ""), p.get("recorded_at") or "", key=f"{key}_when") or None
             new["notes"] = st.text_input("Notes", p.get("notes") or "", key=f"{key}_notes") or None
+        elif it["item_type"] == "appointment":
+            new["title"] = st.text_input("Title", p.get("title") or "", key=f"{key}_title")
+            new["starts_at"] = st.text_input("Date (YYYY-MM-DD, add THH:MM for a time)", p.get("starts_at") or "", key=f"{key}_when")
+            new["doctor_name"] = st.text_input("Doctor", p.get("doctor_name") or "", key=f"{key}_doc") or None
+            new["specialty"] = st.text_input("Specialty", p.get("specialty") or "", key=f"{key}_spec") or None
+            new["notes"] = st.text_input("As said", p.get("notes") or "", key=f"{key}_notes") or None
         elif it["item_type"] == "lab_value":
             new["test_name"] = st.text_input("Test" + (" (unsure)" if "test_name" in low else ""), p.get("test_name") or "", key=f"{key}_test")
             new["numeric_value"] = st.number_input("Value" + (" (unsure)" if "numeric_value" in low else ""),
@@ -871,6 +906,146 @@ def page_appointments() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Doctor conversations (audio)
+# ---------------------------------------------------------------------------
+
+def page_conversations() -> None:
+    u = _user()
+    pid = _need_patient()
+    if not pid:
+        return
+    st.title("Doctor conversations")
+    st.caption("Record or upload the audio of a visit. The app writes down what was said, works out who the doctor was, "
+               "and lists the actions and medication changes that were spoken. It adds nothing of its own.")
+    provider = _provider()
+    if _can("editor"):
+        tab_rec, tab_up = st.tabs(["Record now", "Upload a recording"])
+        with tab_rec:
+            st.caption("Ask the doctor first. Hold the phone near the people speaking.")
+            clip = st.audio_input("Record the conversation", key="conv_record")
+            visit_day = st.date_input("Date of the visit", date.today(), key="conv_rec_date")
+            lang = st.selectbox("Spoken language", ["auto", "en", "ur"], format_func=lambda x: {"auto": "Detect", "en": "English", "ur": "Urdu"}[x], key="conv_rec_lang")
+            if clip is not None and st.button("Transcribe and summarize", type="primary", key="conv_rec_go"):
+                _ingest_conversation(pid, u, clip, provider, visit_day, lang)
+        with tab_up:
+            up = st.file_uploader("Audio file (m4a, mp3, wav, voice note)", type=["m4a", "mp3", "wav", "webm", "ogg", "aac", "flac", "mp4"], key="conv_upload")
+            visit_day2 = st.date_input("Date of the visit", date.today(), key="conv_up_date")
+            lang2 = st.selectbox("Spoken language", ["auto", "en", "ur"], format_func=lambda x: {"auto": "Detect", "en": "English", "ur": "Urdu"}[x], key="conv_up_lang")
+            if up is not None and st.button("Transcribe and summarize", type="primary", key="conv_up_go"):
+                _ingest_conversation(pid, u, up, provider, visit_day2, lang2)
+    rows = consultations.list_consultations(pid, u)
+    pending = {fid: items for fid, items in documents.pending_review(pid, u).items()
+               if any(i["item_type"] in ("medication", "appointment") for i in items)}
+    conv_files = {c["file_id"] for c in rows if c.get("file_id")}
+    pending = {fid: items for fid, items in pending.items() if fid in conv_files}
+    if pending:
+        st.subheader("Said in a conversation, waiting for your confirmation")
+        st.caption("Medications and follow-ups only enter the record after you confirm them here.")
+        _review_items(pid, pending)
+    st.subheader("Conversations on record")
+    if not rows:
+        st.caption("Nothing recorded yet.")
+    for c in rows:
+        label = f"{c['happened_on'] or ''} {c['title']}" + (f" ({c['doctor_name']})" if c.get("doctor_name") else "")
+        with st.expander(label.strip(), expanded=False):
+            _conversation_detail(c, pid, u, provider)
+
+
+def _ingest_conversation(pid: int, u: dict, f, provider, visit_day, lang: str) -> None:
+    data = f.getvalue()
+    name = getattr(f, "name", None) or f"recording-{datetime.now():%Y%m%d-%H%M%S}.wav"
+    mime = getattr(f, "type", None) or "audio/wav"
+    with st.spinner("Transcribing and summarizing. A 20 minute visit takes about a minute."):
+        try:
+            out = consultations.ingest_audio(pid, u, name, mime, data, provider, language=None if lang == "auto" else lang,
+                                             happened_on=visit_day)
+        except Exception as e:
+            _denied(e)
+            return
+    if out.get("error"):
+        st.error(f"Stored, but not processed: {out['error']}")
+    else:
+        st.success(f"Done. {out['items']} medication or follow-up items are waiting for your confirmation below.")
+    st.rerun()
+
+
+def _conversation_detail(c: dict, pid: int, u: dict, provider) -> None:
+    s = c.get("summary") if isinstance(c.get("summary"), dict) else None
+    if c["status"] == "error":
+        st.error(f"Not processed: {c.get('error')}")
+        if _can("editor") and provider is not None and st.button("Try again", key=f"retry_{c['id']}"):
+            with st.spinner("Processing..."):
+                consultations.process(c["id"], pid, u, provider, patient_name=(db.get_patient(pid, u) or {}).get("name"))
+            st.rerun()
+    elif c["status"] == "processing":
+        st.info("Still processing.")
+    if s:
+        conf = s.get("doctor_confidence") or 0
+        st.markdown(f"**Doctor:** {s.get('doctor_name') or 'not identified'}"
+                    + (f", {s['doctor_specialty']}" if s.get("doctor_specialty") else "") + f" (confidence {conf:.0%})")
+        st.markdown(f"**Context:** {s.get('context', '')}")
+        st.markdown(f"**Summary:** {s.get('summary', '')}")
+        if s.get("decisions"):
+            st.markdown("**Decisions**")
+            for d in s["decisions"]:
+                st.markdown(f"- {d}")
+        if s.get("actions"):
+            st.markdown("**Actions asked for**")
+            for a in s["actions"]:
+                st.markdown(f"- {a['text']}" + (f" ({a['who']}, {a['when']})" if a.get("when") else f" ({a['who']})"))
+        if s.get("medication_changes"):
+            st.markdown("**Medication changes said out loud**")
+            st.dataframe(pd.DataFrame([{"Medicine": m["name"], "Dose": m.get("dose") or "", "Frequency": m.get("frequency") or "",
+                                        "Change": m["change"], "Reason": m.get("reason") or "", "Confidence": f"{m['confidence']:.0%}"}
+                                       for m in s["medication_changes"]]), hide_index=True, width="stretch")
+        if s.get("follow_ups"):
+            st.markdown("**Follow-ups**")
+            for f in s["follow_ups"]:
+                st.markdown(f"- {f['title']}" + (f", {f['when_text']}" if f.get("when_text") else "") + (f" ({f['date']})" if f.get("date") else ""))
+        if s.get("questions_left_open"):
+            st.markdown("**Raised but not answered**")
+            for q in s["questions_left_open"]:
+                st.markdown(f"- {q}")
+        if s.get("findings_discussed"):
+            with st.expander("Findings mentioned"):
+                for x in s["findings_discussed"]:
+                    st.markdown(f"- {x}")
+        with st.expander("Transcript"):
+            roles = {sp["label"]: sp for sp in s.get("speakers", [])}
+            for t in s.get("turns", []):
+                sp = roles.get(t["speaker"], {})
+                who = sp.get("name") or f"{t['speaker']} ({sp.get('role', 'unknown')})"
+                st.markdown(f"**{who}:** {t['text']}")
+    doc = db.get_document(c["file_id"], pid, u, with_data=True) if c.get("file_id") else None
+    if doc and doc.get("file_data"):
+        st.audio(bytes(doc["file_data"]), format=doc.get("mime_type") or "audio/mpeg")
+    meta = []
+    if c.get("duration_seconds"):
+        meta.append(f"{float(c['duration_seconds']) / 60:.1f} min")
+    if c.get("cost_usd") is not None:
+        meta.append(f"model cost ${float(c['cost_usd']):.3f}")
+    if c.get("transcription_model"):
+        meta.append(c["transcription_model"])
+    if meta:
+        st.caption(", ".join(meta))
+    if _can("editor"):
+        with st.form(f"conv_edit_{c['id']}"):
+            c1, c2 = st.columns(2)
+            title = c1.text_input("Title", c["title"])
+            when = c2.date_input("Date", c["happened_on"] or date.today())
+            doctor = c1.text_input("Doctor", c.get("doctor_name") or "")
+            spec = c2.text_input("Specialty", c.get("specialty") or "")
+            b1, b2 = st.columns(2)
+            if b1.form_submit_button("Save", width="stretch"):
+                consultations.update_consultation(c["id"], pid, u, title=title.strip() or c["title"], happened_on=when,
+                                                  doctor_name=doctor or None, specialty=spec or None)
+                st.rerun()
+            if b2.form_submit_button("Delete this conversation", width="stretch"):
+                consultations.delete_consultation(c["id"], pid, u)
+                st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Board
 # ---------------------------------------------------------------------------
 
@@ -928,16 +1103,132 @@ def page_board() -> None:
         db.save_chat_message(pid, conv_id, u, "assistant", md, responding_doctor="coordinator",
                              metadata={"run_id": run["id"], "cost_usd": run.get("estimated_cost_usd")})
         st.rerun()
-    with st.expander("Past runs and cost"):
+    with st.expander("Past runs, full workings and cost"):
         runs = board.list_runs(pid, u)
         if runs:
             total = sum(r["estimated_cost_usd"] or 0 for r in runs)
-            st.caption(f"{len(runs)} runs, estimated total ${total:.4f}")
-            st.dataframe(pd.DataFrame([{"When": _fmt(r["created_at"]), "Question": r["query"][:60], "Specialists": ", ".join((r["routed_agents"] or {}).get("agents", [])),
+            st.caption(f"{len(runs)} runs, estimated total ${total:.4f}. Every run is kept: the question, who was asked, "
+                       "what each specialist said, and what the coordinator wrote.")
+            st.dataframe(pd.DataFrame([{"When": _when(r["created_at"]), "Question": r["query"][:60], "Specialists": ", ".join((r["routed_agents"] or {}).get("agents", [])),
                                         "Tokens in": r["input_tokens"], "Tokens out": r["output_tokens"], "Cost $": r["estimated_cost_usd"], "Status": r["status"]} for r in runs]),
                          hide_index=True, width="stretch")
+            labels = {r["id"]: f"{_when(r['created_at'])}: {r['query'][:70]}" for r in runs}
+            chosen = st.selectbox("Open a run", list(labels), format_func=lambda i: labels[i], key="run_pick")
+            if chosen:
+                _run_detail(board.get_run(chosen, pid, u))
         else:
             st.caption("No runs yet.")
+
+
+def _run_detail(run: dict | None) -> None:
+    if not run:
+        return
+    import json as _json
+
+    def _j(v):
+        return _json.loads(v) if isinstance(v, str) else (v or {})
+
+    routed = _j(run.get("routed_agents"))
+    st.markdown(f"**Question:** {run['query']}")
+    st.caption(f"Routed to {', '.join(routed.get('agents', []))}. {routed.get('reason') or ''}")
+    if run.get("error"):
+        st.warning(run["error"])
+    for o in _j(run.get("specialist_outputs")) or []:
+        with st.container(border=True):
+            st.markdown(f"**{o.get('agent_type', '').replace('_', ' ').title()}** (confidence {o.get('confidence', 0):.0%})")
+            st.write(o.get("summary", ""))
+            for ob in o.get("observations", []):
+                st.markdown(f"- {ob.get('text')}")
+            for q in o.get("questions_for_doctor", []):
+                st.markdown(f"- Ask {q.get('for_doctor')}: {q.get('question')}")
+            if o.get("missing_records"):
+                st.caption("Missing: " + ", ".join(o["missing_records"]))
+            if o.get("declined_advice_request"):
+                st.caption("Declined an advice request.")
+    co = _j(run.get("coordinator_output"))
+    if co:
+        with st.container(border=True):
+            st.markdown(f"**Coordinator:** {co.get('headline', '')}")
+            for x in co.get("what_changed", []):
+                st.markdown(f"- {x}")
+            for g in co.get("questions_by_doctor", []):
+                st.markdown(f"**For {g.get('doctor')}**")
+                for q in g.get("questions", []):
+                    st.markdown(f"- {q}")
+    calls = _j(run.get("model_calls")) or []
+    if calls:
+        st.dataframe(pd.DataFrame([{"Purpose": c.get("purpose"), "Model": c.get("model"), "In": c.get("input_tokens"),
+                                    "Out": c.get("output_tokens"), "Cost $": c.get("cost_usd"), "ms": c.get("duration_ms"),
+                                    "Error": c.get("error") or ""} for c in calls]), hide_index=True, width="stretch")
+
+
+# ---------------------------------------------------------------------------
+# Memory: what each agent remembers, editable
+# ---------------------------------------------------------------------------
+
+def page_memory() -> None:
+    u = _user()
+    pid = _need_patient()
+    if not pid:
+        return
+    st.title("What the specialists remember")
+    st.caption("Each specialist keeps short notes about this patient from board runs, confirmed documents and doctor "
+               "conversations. They are shown to the specialists on the next run. Fix or remove anything wrong here.")
+    rows = db.list_doctor_memories(pid, u)
+    agents = {a["agent_type"]: a for a in db.get_doctor_agents(active_only=False)}
+    names = {k: (a.get("display_name") or a.get("name") or k.replace("_", " ").title()) for k, a in agents.items()}
+    if not rows:
+        st.caption("Nothing remembered yet.")
+        return
+    by_agent: dict[str, list[dict]] = {}
+    for r in rows:
+        by_agent.setdefault(r["doctor_type"], []).append(r)
+    editable = _can("editor")
+    pick = st.selectbox("Specialist", ["all"] + list(by_agent), format_func=lambda k: "All specialists" if k == "all" else names.get(k, k), key="mem_pick")
+    if _can("admin"):
+        c1, c2 = st.columns([3, 1])
+        c1.caption(f"{len(rows)} notes on record.")
+        if c2.button("Clear " + ("all" if pick == "all" else names.get(pick, pick)), key="mem_clear"):
+            st.session_state.mem_clear_confirm = True
+        if st.session_state.get("mem_clear_confirm"):
+            st.warning("This removes the notes for good. The documents and runs they came from stay.")
+            if st.button("Yes, clear them", type="primary", key="mem_clear_yes"):
+                db.clear_doctor_memories(pid, u, None if pick == "all" else pick)
+                st.session_state.pop("mem_clear_confirm", None)
+                st.rerun()
+    for agent_type, items in by_agent.items():
+        if pick != "all" and agent_type != pick:
+            continue
+        st.subheader(names.get(agent_type, agent_type))
+        for m in items:
+            src = []
+            if m.get("source_run_id"):
+                src.append(f"board run {m['source_run_id']}")
+            if m.get("source_consultation_id"):
+                src.append(f"conversation {m['source_consultation_id']}")
+            if m.get("source_file_id"):
+                src.append(f"document {m['source_file_id']}")
+            if m.get("created_by_name"):
+                src.append(f"by {m['created_by_name']}")
+            with st.container(border=True):
+                st.caption(f"{_when(m['created_at'])}, {m['memory_type'].replace('_', ' ')}" + (", from " + ", ".join(src) if src else "")
+                           + (", edited" if m.get("updated_at") else ""))
+                if editable:
+                    with st.form(f"mem_{m['id']}"):
+                        text = st.text_area("Note", m["content"], key=f"mem_text_{m['id']}", label_visibility="collapsed")
+                        imp = st.slider("Importance", 1, 10, int(m.get("importance") or 5), key=f"mem_imp_{m['id']}")
+                        b1, b2 = st.columns(2)
+                        if b1.form_submit_button("Save", width="stretch"):
+                            try:
+                                db.update_doctor_memory(m["id"], pid, u, text, imp)
+                                st.rerun()
+                            except Exception as e:
+                                _denied(e)
+                        if b2.form_submit_button("Delete", width="stretch"):
+                            db.delete_doctor_memory(m["id"], pid, u)
+                            st.rerun()
+                else:
+                    st.write(m["content"])
 
 
 # ---------------------------------------------------------------------------
@@ -1072,6 +1363,7 @@ def page_settings() -> None:
 
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, page_icon=":hospital:", layout="wide")
+    ui.inject()
     if not os.environ.get("DATABASE_URL"):
         st.error("DATABASE_URL is not set.")
         return
@@ -1098,8 +1390,10 @@ def main() -> None:
         st.Page(page_medications, title="Medications", icon=":material/medication:"),
         st.Page(page_values, title="Values", icon=":material/monitoring:"),
         st.Page(page_appointments, title="Appointments", icon=":material/calendar_month:"),
+        st.Page(page_conversations, title="Conversations", icon=":material/mic:"),
         st.Page(page_board, title="Board", icon=":material/groups:"),
         st.Page(page_brief, title="Brief", icon=":material/description:"),
+        st.Page(page_memory, title="Memory", icon=":material/psychology:"),
         st.Page(page_settings, title="Settings", icon=":material/settings:"),
     ]
     st.navigation(pages).run()

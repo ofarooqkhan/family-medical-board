@@ -11,6 +11,10 @@ import re
 import sys
 import time
 
+import io
+import struct
+import wave
+
 import pymupdf
 from playwright.sync_api import expect, sync_playwright
 
@@ -24,6 +28,16 @@ def pdf_bytes():
     p = doc.new_page()
     p.insert_text((72, 72), "Prescription: Metformin 500 mg twice daily. Dr. Demo")
     return doc.tobytes()
+
+
+def wav_bytes(seconds=1.0, rate=8000):
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"".join(struct.pack("<h", 0) for _ in range(int(seconds * rate))))
+    return buf.getvalue()
 
 
 def shot(page, name):
@@ -73,7 +87,7 @@ with sync_playwright() as pw:
     wait_idle(page, 1500)
     shot(page, "03-home-patient")
     assert "Parent One" in page.content()
-    assert "Items awaiting review" in page.content()
+    assert "Looking after Parent One" in page.inner_text("body")
 
     # Upload a prescription PDF in demo mode.
     nav(page, "Documents")
@@ -123,6 +137,25 @@ with sync_playwright() as pw:
     assert page.get_by_role("button", name="Apple or other (.ics)").count() == 1
     shot(page, "07b-appointment-links")
 
+    nav(page, "Conversations")
+    page.get_by_role("tab", name="Upload a recording").click()
+    wait_idle(page)
+    page.locator("input[type='file']").last.set_input_files({"name": "visit.wav", "mimeType": "audio/wav", "buffer": wav_bytes()})
+    wait_idle(page, 1500)
+    page.get_by_role("button", name="Transcribe and summarize").last.click()
+    wait_idle(page, 4000)
+    shot(page, "07c-conversation")
+    text = page.inner_text("body")
+    assert "Diabetes review with Dr. Demo" in text and "waiting for your confirmation" in text, text[:800]
+    assert page.get_by_role("button", name="Confirm").count() >= 1
+    page.get_by_role("button", name="Confirm").first.click()
+    wait_idle(page, 2000)
+    page.get_by_text("Diabetes review with Dr. Demo").first.click()
+    wait_idle(page, 800)
+    text = page.inner_text("body")
+    assert "Repeat HbA1c in three months" in text and "Medication changes said out loud" in text and "Transcript" in text
+    shot(page, "07d-conversation-detail")
+
     nav(page, "Board")
     page.get_by_test_id("stChatInputTextArea").fill("What changed since the last visit?")
     page.keyboard.press("Enter")
@@ -147,6 +180,15 @@ with sync_playwright() as pw:
 
     nav(page, "Values")
     shot(page, "11-values")
+    nav(page, "Memory")
+    wait_idle(page, 1000)
+    text = page.inner_text("body")
+    assert "What the specialists remember" in text and "board run" in text and "conversation" in text, text[:600]
+    page.get_by_role("button", name="Save").first.click()
+    wait_idle(page, 1500)
+    page.get_by_role("button", name="Delete").first.click()
+    wait_idle(page, 1500)
+    shot(page, "11b-memory")
     nav(page, "Settings")
     page.get_by_role("tab", name="People and invites").click()
     wait_idle(page)

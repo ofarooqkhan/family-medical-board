@@ -123,6 +123,32 @@ app with a basic layer first, then deep dive into orchestration and iterate.
   test `tests/e2e/smoke.py` passes end to end in demo mode; screenshots in
   `docs/screenshots/`.
 
+- Owner round 2 (2026-10-15, `4fa2f09`): prescription upload on the
+  Medications page, readings import from CSV, Excel, typed text or a photo
+  of a log (`values_import.py`, `vitals_log` document kind), admin delete
+  patient, invites bound to an email with WhatsApp and mail share links
+  (migration 0004).
+- Owner round 3 (`9e9eb3c`, `ad25943`, `9a269cc`): remembered sign-in
+  (sessions table, 30 day cookie, last patient per user, migration 0005);
+  per-appointment Google Calendar, Outlook, .ics and WhatsApp buttons;
+  appointment times entered in the device timezone and stored UTC
+  (`st.context.timezone`); add-to-home-screen support (manifest, icons,
+  Apple meta tags served from `static/` and patched into Streamlit's
+  index.html once per process by `app._install_home_screen_support`).
+- Owner round 4: doctor conversations. `consultations.py` stores a visit
+  recording (upload or `st.audio_input`), transcribes through
+  `Provider.transcribe` (diarizing model first, plain model fallback),
+  summarizes with a fixed schema (doctor identified with confidence,
+  turns by speaker, context, summary, decisions, actions, medication
+  changes, follow-ups, open questions), and queues medication starts and
+  dated follow-ups as pending items (`appointment` item type added to
+  `confirm_item`). Migration 0006. Brief carries recent conversations.
+- Owner round 6: every board run is kept with each specialist's output and
+  can be opened on the Board page; after a run every specialist that took
+  part writes a `review` memory tied to the run, a conversation writes a
+  memory for general duty; the Memory page lists, edits, deletes and
+  (admin) clears memories. Migration 0007 adds provenance columns.
+
 ### Not done
 - Hosted on Replit (section 8.0). Render, Railway, and docker compose remain
   as alternatives in the README.
@@ -633,6 +659,24 @@ the hosted Postgres (`2220bc6`, ping plus keepalives). Keep the workspace
 and main in step by pulling main in the Repl before each publish. Creating new Repls needs a subscription
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
+
+### 8.0b Publishing after rounds 2 to 6 (owner action)
+`publish_app` from the connector is refused once the schema changed:
+"applying database changes to the live app needs a review that is only
+available on the Replit website". The owner opens the Repl, presses
+Publish, approves the database change review, and later republishes can
+come from the connector again. Migrations 0004 to 0007 run at app start on
+the live database. Pull main in the Repl first (Replit Agent did this for
+`4fa2f09`; repeat for the latest main).
+Transcription on Replit is not yet verified: the Replit OpenAI integration
+may not route the audio endpoint. If a conversation shows "transcription
+failed", set a direct `OPENAI_API_KEY` secret in the Repl (the provider
+prefers it) and try again. The fallback chain is
+`gpt-4o-transcribe-diarize`, `gpt-4o-transcribe`, `whisper-1`.
+Streamlit on Autoscale: sessions live in one process. Keep the deployment
+at one machine, or move to a Reserved VM, so the websocket always reaches
+the process that holds the session. The remembered-sign-in cookie covers a
+cold start: a new process signs the person back in from the cookie.
 
 ### 8.0a Earlier Replit notes (2026-10-12)
 The session used the Replit connector to sync the repo into the existing
