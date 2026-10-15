@@ -660,6 +660,20 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0e Republish and Replit's schema sync (2026-10-15)
+Replit validates a republish by diffing the development schema against
+production and applying its own SQL to production before the new build
+starts. The first attempt failed validation ("DROP CONSTRAINT
+doctor_memory_source_consultation_id_fkey does not exist") because the
+development database had been left half way through a downgrade. The
+owner cancelled. Fix in `c9b8d90`: migrations 0004 to 0007 skip tables,
+columns and indexes that already exist, so after Replit's sync the app's
+startup upgrade still completes and stamps the head. Never choose "Copy
+your development database schema and data to production": it replaces
+production data (the owner's accounts) with the development copy.
+Sequence that works: restart the workspace app so development is at the
+head, then Republish, then approve the review.
+
 ### 8.0d Live state at the end of 2026-10-15
 - GitHub main `735b84b`, CI green. Repl workspace runs the same files
   (Replit Agent added a commit of its own on top; python files identical).
