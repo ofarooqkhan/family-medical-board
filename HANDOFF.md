@@ -660,6 +660,21 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0g Conversations flow verified with the real model (2026-10-15)
+`tests/e2e/make_visit_audio.py` speaks a doctor and family exchange with
+the espeak-ng library from the `espeakng-loader` wheel (34 s, two
+voices). On the Repl, `transcribe_check.py --ingest` with that clip and
+the Replit OpenAI integration: gpt-4o-transcribe returned the words
+exactly, the gpt-4o summary labelled speaker A as the doctor (0.9) and B
+as family, listed three decisions, three actions and three medication
+changes (amlodipine start, metformin continue, aspirin continue), queued
+one pending medication item, confirmation put amlodipine 5 mg on the
+list, the general duty memory and the audit rows were written, and the
+temporary account and patient were removed. Cost about one cent per
+conversation of this length. The diarizing model is rejected by the
+gateway ("Unexpected audio response format: diarized_json") and the
+fallback handles it. Exit 0, 24 seconds.
+
 ### 8.0f Published (2026-10-15, later)
 The owner republished after `c9b8d90`. Replit's schema sync created the
 new tables on production, the first page load ran the guarded
