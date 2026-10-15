@@ -188,11 +188,17 @@ with sync_playwright() as pw:
     nav(page, "Memory")
     wait_idle(page, 1000)
     text = page.inner_text("body")
-    assert "What the specialists remember" in text and "board run" in text and "conversation" in text, text[:600]
-    page.get_by_role("button", name="Save").first.click()
+    assert "What the specialists remember" in text and "Profile of Parent" in text and "board run" in text, text[:600]
+    notes_text = " ".join(page.locator("textarea").evaluate_all("els => els.map(e => e.value)"))
+    assert "(demo) Type 2 diabetes" in notes_text, "consolidation wrote a profile fact"
+    # Correct a note: the correction becomes a lesson.
+    page.get_by_role("button", name="Still true").first.click()
     wait_idle(page, 1500)
+    assert "still true on" in page.inner_text("body")
     page.get_by_role("button", name="Delete").first.click()
     wait_idle(page, 1500)
+    text = page.inner_text("body")
+    assert "removed a note" in text, "lesson recorded"
     shot(page, "11b-memory")
     nav(page, "Settings")
     page.get_by_role("tab", name="People and invites").click()

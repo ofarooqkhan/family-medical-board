@@ -24,6 +24,7 @@ import consultations
 import database as db
 import documents
 import medications as meds
+import memory
 import ui
 import values_import
 from extraction import parse_date, rows_from_vital_payload as extraction_rows
@@ -1216,64 +1217,127 @@ def page_memory() -> None:
     pid = _need_patient()
     if not pid:
         return
+    patient = db.get_patient(pid, u) or {}
+    first = (patient.get("name") or "").split(" ")[0]
     st.title("What the specialists remember")
-    st.caption("Each specialist keeps short notes about this patient from board runs, confirmed documents and doctor "
-               "conversations. They are shown to the specialists on the next run. Fix or remove anything wrong here.")
+    st.caption("Three layers. The profile: facts about " + (first or "the patient") + " that every specialist reads. "
+               "Each specialist's own notes. And lessons from your corrections, which every specialist reads for every patient. "
+               "Fix or remove anything wrong; the change is remembered.")
+    editable = _can("editor")
     rows = db.list_doctor_memories(pid, u)
     agents = {a["agent_type"]: a for a in db.get_doctor_agents(active_only=False)}
     names = {k: (a.get("display_name") or a.get("name") or k.replace("_", " ").title()) for k, a in agents.items()}
-    if not rows:
-        st.caption("Nothing remembered yet.")
-        return
-    by_agent: dict[str, list[dict]] = {}
-    for r in rows:
-        by_agent.setdefault(r["doctor_type"], []).append(r)
-    editable = _can("editor")
-    pick = st.selectbox("Specialist", ["all"] + list(by_agent), format_func=lambda k: "All specialists" if k == "all" else names.get(k, k), key="mem_pick")
-    if _can("admin"):
-        c1, c2 = st.columns([3, 1])
-        c1.caption(f"{len(rows)} notes on record.")
-        if c2.button("Clear " + ("all" if pick == "all" else names.get(pick, pick)), key="mem_clear"):
-            st.session_state.mem_clear_confirm = True
-        if st.session_state.get("mem_clear_confirm"):
-            st.warning("This removes the notes for good. The documents and runs they came from stay.")
-            if st.button("Yes, clear them", type="primary", key="mem_clear_yes"):
-                db.clear_doctor_memories(pid, u, None if pick == "all" else pick)
-                st.session_state.pop("mem_clear_confirm", None)
+    names[db.SHARED_AGENT] = "Profile"
+    active = [m for m in rows if m["status"] == "active"]
+    superseded = [m for m in rows if m["status"] != "active"]
+    facts = [m for m in active if m["doctor_type"] == db.SHARED_AGENT]
+    notes = [m for m in active if m["doctor_type"] != db.SHARED_AGENT]
+
+    st.subheader(f"Profile of {first}" if first else "Profile")
+    st.caption("Established from records, conversations and your edits. Tap 'Still true' now and then so these never fade.")
+    if editable:
+        with st.form("mem_add_fact", clear_on_submit=True):
+            c1, c2 = st.columns([3, 1])
+            text = c1.text_input("Add a fact the specialists should always know", placeholder="e.g. Allergic to penicillin")
+            cat = c2.selectbox("Kind", list(memory.PROFILE_CATEGORIES), index=len(memory.PROFILE_CATEGORIES) - 1)
+            if st.form_submit_button("Add to the profile", width="stretch") and text.strip():
+                db.save_doctor_memory(pid, u, db.SHARED_AGENT, "fact", text.strip(), importance=8, category=cat)
+                db.confirm_doctor_memory(db.list_doctor_memories(pid, u)[0]["id"], pid, u)
                 st.rerun()
-    for agent_type, items in by_agent.items():
-        if pick != "all" and agent_type != pick:
-            continue
-        st.subheader(names.get(agent_type, agent_type))
-        for m in items:
-            src = []
-            if m.get("source_run_id"):
-                src.append(f"board run {m['source_run_id']}")
-            if m.get("source_consultation_id"):
-                src.append(f"conversation {m['source_consultation_id']}")
-            if m.get("source_file_id"):
-                src.append(f"document {m['source_file_id']}")
-            if m.get("created_by_name"):
-                src.append(f"by {m['created_by_name']}")
-            with st.container(border=True):
-                st.caption(f"{_when(m['created_at'])}, {m['memory_type'].replace('_', ' ')}" + (", from " + ", ".join(src) if src else "")
-                           + (", edited" if m.get("updated_at") else ""))
-                if editable:
-                    with st.form(f"mem_{m['id']}"):
-                        text = st.text_area("Note", m["content"], key=f"mem_text_{m['id']}", label_visibility="collapsed")
-                        imp = st.slider("Importance", 1, 10, int(m.get("importance") or 5), key=f"mem_imp_{m['id']}")
-                        b1, b2 = st.columns(2)
-                        if b1.form_submit_button("Save", width="stretch"):
-                            try:
-                                db.update_doctor_memory(m["id"], pid, u, text, imp)
-                                st.rerun()
-                            except Exception as e:
-                                _denied(e)
-                        if b2.form_submit_button("Delete", width="stretch"):
-                            db.delete_doctor_memory(m["id"], pid, u)
-                            st.rerun()
-                else:
-                    st.write(m["content"])
+    if not facts:
+        st.caption("Nothing established yet. Facts appear here after board runs and conversations, or add one above.")
+    for m in facts:
+        _memory_card(m, pid, u, editable, names, show_confirm=True)
+
+    st.subheader("Lessons from your corrections")
+    lessons = db.get_lessons(u, limit=50)
+    if not lessons:
+        st.caption("None yet. Whenever you correct or remove a note, the correction is kept here and shown to every specialist.")
+    for l in lessons:
+        with st.container(border=True):
+            st.caption(_when(l["created_at"]))
+            c1, c2 = st.columns([4, 1])
+            c1.write(l["content"])
+            if editable and c2.button("Forget", key=f"lesson_del_{l['id']}", width="stretch"):
+                db.delete_lesson(l["id"], u)
+                st.rerun()
+
+    st.subheader("Each specialist's own notes")
+    by_agent: dict[str, list[dict]] = {}
+    for r in notes:
+        by_agent.setdefault(r["doctor_type"], []).append(r)
+    if not by_agent:
+        st.caption("No notes yet. Specialists write one after every board run.")
+    else:
+        pick = st.selectbox("Specialist", ["all"] + list(by_agent), format_func=lambda k: "All specialists" if k == "all" else names.get(k, k), key="mem_pick")
+        if _can("admin"):
+            c1, c2 = st.columns([3, 1])
+            c1.caption(f"{len(notes)} notes on record.")
+            if c2.button("Clear " + ("all notes" if pick == "all" else names.get(pick, pick)), key="mem_clear"):
+                st.session_state.mem_clear_confirm = True
+            if st.session_state.get("mem_clear_confirm"):
+                st.warning("This removes the notes for good. The documents and runs they came from stay. The profile is kept.")
+                if st.button("Yes, clear them", type="primary", key="mem_clear_yes"):
+                    if pick == "all":
+                        for agent_type in by_agent:
+                            db.clear_doctor_memories(pid, u, agent_type)
+                    else:
+                        db.clear_doctor_memories(pid, u, pick)
+                    st.session_state.pop("mem_clear_confirm", None)
+                    st.rerun()
+        for agent_type, items in by_agent.items():
+            if pick != "all" and agent_type != pick:
+                continue
+            st.markdown(f"**{names.get(agent_type, agent_type)}**")
+            for m in items:
+                _memory_card(m, pid, u, editable, names)
+
+    if superseded:
+        with st.expander(f"Replaced facts ({len(superseded)})"):
+            st.caption("Older facts a newer one replaced. Restore one if the replacement was wrong.")
+            for m in superseded:
+                c1, c2 = st.columns([4, 1])
+                c1.write(f"{m['content']}  ")
+                c1.caption(f"{_when(m['created_at'])}, replaced" + (f" by note {m['superseded_by']}" if m.get("superseded_by") else ""))
+                if editable and c2.button("Restore", key=f"mem_restore_{m['id']}", width="stretch"):
+                    db.restore_doctor_memory(m["id"], pid, u)
+                    st.rerun()
+
+
+def _memory_card(m: dict, pid: int, u: dict, editable: bool, names: dict, show_confirm: bool = False) -> None:
+    src = []
+    if m.get("source_run_id"):
+        src.append(f"board run {m['source_run_id']}")
+    if m.get("source_consultation_id"):
+        src.append(f"conversation {m['source_consultation_id']}")
+    if m.get("source_file_id"):
+        src.append(f"document {m['source_file_id']}")
+    if m.get("created_by_name"):
+        src.append(f"by {m['created_by_name']}")
+    with st.container(border=True):
+        kind = (m.get("category") or m["memory_type"]).replace("_", " ")
+        confirmed = f", still true on {_when(m['last_confirmed_at'])[:11]}" if m.get("last_confirmed_at") else ""
+        st.caption(f"{_when(m['created_at'])}, {kind}" + (", from " + ", ".join(src) if src else "")
+                   + (", edited" if m.get("updated_at") else "") + confirmed)
+        if not editable:
+            st.write(m["content"])
+            return
+        with st.form(f"mem_{m['id']}"):
+            text = st.text_area("Note", m["content"], key=f"mem_text_{m['id']}", label_visibility="collapsed")
+            imp = st.slider("Importance", 1, 10, int(m.get("importance") or 5), key=f"mem_imp_{m['id']}")
+            cols = st.columns(3 if show_confirm else 2)
+            if cols[0].form_submit_button("Save", width="stretch"):
+                try:
+                    db.update_doctor_memory(m["id"], pid, u, text, imp)
+                    st.rerun()
+                except Exception as e:
+                    _denied(e)
+            if cols[1].form_submit_button("Delete", width="stretch"):
+                db.delete_doctor_memory(m["id"], pid, u)
+                st.rerun()
+            if show_confirm and cols[2].form_submit_button("Still true", width="stretch"):
+                db.confirm_doctor_memory(m["id"], pid, u)
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------

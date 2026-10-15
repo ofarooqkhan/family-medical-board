@@ -660,6 +660,28 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0k Round 8: memory that improves with use (2026-10-15)
+Built under the recommended defaults the owner had not yet answered
+(lessons family-wide, automatic consolidation with restore, raw notes
+kept, keyword relevance with no embeddings yet, standing instructions
+from conversations). `memory.py` holds the logic; migration 0008 adds
+status, superseded_by, category and last_confirmed_at to doctor_memory.
+Three layers: profile (doctor_type "shared", per patient, every
+specialist reads it), per-specialist notes (a specialist sees only its
+own, ranked by keyword relevance to the question then importance with a
+slow decay, no decay once the family taps "Still true"), and lessons
+(doctor_type "family", patient_id NULL) written automatically when the
+family edits or removes a note, shown to every specialist for every
+patient. After each board run `memory.consolidate` makes one small call
+(MODEL_MEMORY, default gpt-4o-mini) that adds established facts to the
+profile, supersedes replaced ones (kept, restorable on the Memory page)
+and records contradictions as coordinator notes. Conversations write the
+doctor and the standing instructions into the profile. The brief lists
+the profile. Memory page: profile with add, edit, delete, "Still true";
+lessons with Forget; notes per specialist; replaced facts with Restore.
+Embeddings: not used; check whether the Replit gateway offers
+`/embeddings` before adding them.
+
 ### 8.0j Round 9 live (2026-10-15)
 `fe4f4b9` synced and republished from the connector; deployment running.
 Still open: the memory redesign (task 19), waiting on the owner's answers
