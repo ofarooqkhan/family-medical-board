@@ -971,6 +971,25 @@ def _ingest_conversation(pid: int, u: dict, f, provider, visit_day, lang: str) -
 
 def _conversation_detail(c: dict, pid: int, u: dict, provider) -> None:
     s = c.get("summary") if isinstance(c.get("summary"), dict) else None
+    if _can("editor"):
+        left, right = st.columns([3, 1])
+        left.caption("Uploaded by mistake, or the wrong patient? Remove it here. The audio, the summary and any items still waiting for confirmation go with it.")
+        flag = f"conv_del_{c['id']}"
+        if right.button("Delete this conversation", key=f"del_{c['id']}", width="stretch"):
+            st.session_state[flag] = True
+        if st.session_state.get(flag):
+            st.warning("This cannot be undone.")
+            y, n = st.columns(2)
+            if y.button("Yes, delete it", type="primary", key=f"del_yes_{c['id']}", width="stretch"):
+                try:
+                    consultations.delete_consultation(c["id"], pid, u)
+                except Exception as e:
+                    _denied(e)
+                st.session_state.pop(flag, None)
+                st.rerun()
+            if n.button("Keep it", key=f"del_no_{c['id']}", width="stretch"):
+                st.session_state.pop(flag, None)
+                st.rerun()
     if c["status"] == "error":
         st.error(f"Not processed: {c.get('error')}")
         if _can("editor") and provider is not None and st.button("Try again", key=f"retry_{c['id']}"):
@@ -1035,13 +1054,9 @@ def _conversation_detail(c: dict, pid: int, u: dict, provider) -> None:
             when = c2.date_input("Date", c["happened_on"] or date.today())
             doctor = c1.text_input("Doctor", c.get("doctor_name") or "")
             spec = c2.text_input("Specialty", c.get("specialty") or "")
-            b1, b2 = st.columns(2)
-            if b1.form_submit_button("Save", width="stretch"):
+            if st.form_submit_button("Save", width="stretch"):
                 consultations.update_consultation(c["id"], pid, u, title=title.strip() or c["title"], happened_on=when,
                                                   doctor_name=doctor or None, specialty=spec or None)
-                st.rerun()
-            if b2.form_submit_button("Delete this conversation", width="stretch"):
-                consultations.delete_consultation(c["id"], pid, u)
                 st.rerun()
 
 

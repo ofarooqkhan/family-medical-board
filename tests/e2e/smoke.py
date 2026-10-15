@@ -155,6 +155,14 @@ with sync_playwright() as pw:
     text = page.inner_text("body")
     assert "Repeat HbA1c in three months" in text and "Medication changes said out loud" in text and "Transcript" in text
     shot(page, "07d-conversation-detail")
+    # A wrong upload can be removed: two taps, with a way back.
+    page.get_by_role("button", name="Delete this conversation").first.click()
+    wait_idle(page, 1000)
+    assert "This cannot be undone" in page.inner_text("body")
+    page.get_by_role("button", name="Keep it").click()
+    wait_idle(page, 1000)
+    assert "This cannot be undone" not in page.inner_text("body")
+    assert "Diabetes review with Dr. Demo" in page.inner_text("body")
 
     nav(page, "Board")
     page.get_by_test_id("stChatInputTextArea").fill("What changed since the last visit?")
