@@ -21,6 +21,7 @@ KIND_LABELS = {
     "imaging_report": "Imaging report",
     "discharge_summary": "Discharge summary or letter",
     "vitals_log": "Readings log (BP, sugar, weight)",
+    "medication_list": "Medication list or table",
     "consultation_audio": "Doctor conversation (audio)",
     "other": "Other document",
 }
@@ -130,6 +131,7 @@ def run_extraction(patient_id: int, file_id: int, user: dict, provider: Provider
     doc_date = extraction.parse_date(result.document_date)
     db.set_document_extraction(file_id, patient_id, user, extraction=result.model_dump(), model=model,
                                document_kind=result.kind, document_date=doc_date)
+    summary["read_as"] = model_reading(result)
     _discard_pending(patient_id, file_id, user)
     ids = db.add_extracted_items(patient_id, file_id, user, result.items)
     summary.update({"kind": result.kind, "items": len(ids), "item_ids": ids, "calls": result.calls,
@@ -139,6 +141,23 @@ def run_extraction(patient_id: int, file_id: int, user: dict, provider: Provider
     else:
         summary["to_check"] = [item_label(i) for i in db.list_extracted_items(patient_id, user, file_id=file_id, status="pending")]
     return summary
+
+
+def model_reading(result) -> str:
+    """One line on what the model made of the pages, for the upload summary."""
+    d = result.document or {}
+    kind = result.kind
+    if kind in ("prescription", "medication_list"):
+        n = len(d.get("medications") or [])
+        who = d.get("prescriber") or d.get("clinic")
+        return f"{n} medicine{'s' if n != 1 else ''}" + (f", from {who}" if who else "") + (f", dated {d['document_date']}" if d.get("document_date") else "")
+    if kind == "lab_report":
+        return f"{len(d.get('values') or [])} test results" + (f" from {d['lab_name']}" if d.get("lab_name") else "")
+    if kind == "imaging_report":
+        return f"{d.get('modality') or 'imaging'} report, {len(d.get('items') or [])} findings"
+    if kind == "vitals_log":
+        return f"{len(d.get('readings') or [])} readings"
+    return (d.get("summary") or d.get("title") or "no readable content")[:300]
 
 
 def _discard_pending(patient_id: int, file_id: int, user: dict) -> None:

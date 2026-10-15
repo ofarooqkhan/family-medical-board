@@ -16,7 +16,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
-from providers import ModelCall, Part, Provider
+from providers import ModelCall, Part, Provider, ProviderError
 
 MAX_PAGES = 12
 RENDER_DPI = 150
@@ -28,7 +28,7 @@ JPEG_QUALITY = 85
 MAX_REQUEST_BYTES = 5_500_000
 MAX_PAGES_PER_CALL = 4
 
-DocumentKind = Literal["prescription", "lab_report", "imaging_report", "discharge_summary", "vitals_log", "other"]
+DocumentKind = Literal["prescription", "medication_list", "lab_report", "imaging_report", "discharge_summary", "vitals_log", "other"]
 
 TRANSCRIBE_RULES = (
     "Transcribe only what is printed or handwritten on the pages. Do not infer, complete, or "
@@ -165,6 +165,7 @@ class VitalsLogDocument(BaseModel):
 SCHEMA_FOR_KIND: dict[str, type[BaseModel]] = {
     "vitals_log": VitalsLogDocument,
     "prescription": PrescriptionDocument,
+    "medication_list": PrescriptionDocument,
     "lab_report": LabReportDocument,
     "imaging_report": ImagingReportDocument,
     "discharge_summary": GenericDocument,
@@ -360,8 +361,11 @@ def _merge_documents(first: dict[str, Any], more: list[dict[str, Any]]) -> dict[
 
 
 def classify(provider: Provider, model: str, pages: list[dict[str, Any]]) -> tuple[DocumentClassification, ModelCall]:
-    system = ("You classify one medical document for a family caregiver's record system. "
-              "Pick the kind that fits best. " + TRANSCRIBE_RULES)
+    system = ("You classify one medical document for a family caregiver's record system. Pick the kind that fits best. "
+              "prescription: a doctor's prescription or pharmacy slip. medication_list: any list or table of medicines with "
+              "doses, typed, handwritten, a screenshot of a chat or a summary, a discharge medication table. lab_report: "
+              "laboratory results. imaging_report: X-ray, CT, MRI, ultrasound report. vitals_log: home readings (blood "
+              "pressure, sugar, weight). discharge_summary: a hospital letter. other: anything else. " + TRANSCRIBE_RULES)
     first = pages[:2]
     return provider.structured(model=model, system=system, parts=_page_parts(first),
                                schema=DocumentClassification, purpose="classify", max_tokens=400)
@@ -371,6 +375,11 @@ def extract(provider: Provider, model: str, pages: list[dict[str, Any]], kind: s
     schema = SCHEMA_FOR_KIND.get(kind, GenericDocument)
     focus = {
         "prescription": "This is a prescription or medication list. Capture every medication line as its own item.",
+        "medication_list": ("This is a list or table of medicines (typed, handwritten, or a screenshot of a chat or a summary). "
+                            "Capture every row as its own medication item: name as written (brand and generic if both appear), "
+                            "dose, frequency, and put any status remark (stopped, unconfirmed, unresolved, prescribed by) in "
+                            "instructions. If a row says the frequency or status is unresolved, add that field to "
+                            "low_confidence_fields rather than guessing."),
         "lab_report": "This is a laboratory report. Capture every test row as its own item, with the unit and reference range as printed.",
         "imaging_report": "This is an imaging report (X-ray, CT, MRI, ultrasound). Capture each finding and impression sentence as its own item.",
         "discharge_summary": "This is a discharge summary or clinical letter. Capture the key facts and every medication mentioned by name.",
@@ -422,6 +431,15 @@ def extract_document(provider: Provider, model: str, pages: list[dict[str, Any]]
         kind = classification.kind
     doc, call = extract(provider, model, pages, kind)
     calls.append(call)
+    # A generic document that turns out to list medicines gets a second, proper read.
+    if isinstance(doc, GenericDocument) and doc.medications_mentioned:
+        try:
+            doc2, call2 = extract(provider, model, pages, "medication_list")
+        except ProviderError:
+            doc2, call2 = None, None
+        if doc2 is not None and getattr(doc2, "medications", None):
+            doc, kind = doc2, "medication_list"
+            calls.append(call2)
     data = doc.model_dump()
     return ExtractionResult(
         kind=kind,

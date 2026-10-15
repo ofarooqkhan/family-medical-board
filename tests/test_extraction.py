@@ -264,3 +264,25 @@ def test_provider_content_uses_jpeg_data_url_for_jpeg_bytes():
     content = OpenAIProvider._content([Part.of_png(b"\xff\xd8\xff\xe0abc"), Part.of_png(b"\x89PNG\r\n\x1a\nabc")])
     assert content[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_generic_document_with_medicines_gets_a_second_read_as_a_medication_list():
+    generic = {"title": "Chat summary", "author": None, "patient_name": None, "document_date": None,
+               "summary": "A table of medicines with doses.", "facts": [], "overall_confidence": 0.7,
+               "medications_mentioned": ["Apixaban", "Telmisartan"]}
+    rx = dict(RX)
+    rx["medications"] = [dict(RX["medications"][0], name="Apixaban / Apixaget", dose="2.5 mg", frequency="twice daily", confidence=0.9, low_confidence_fields=[]),
+                         dict(RX["medications"][0], name="Metformin XR", dose="500 mg", frequency="with evening food", confidence=0.8, low_confidence_fields=["frequency"])]
+    fake = FakeProvider(responses={
+        DocumentClassification: {"kind": "other", "confidence": 0.6, "patient_name": None, "document_date": None, "language": "en", "reason": "table"},
+        GenericDocument: generic, PrescriptionDocument: rx})
+    pages = [{"page_number": 1, "image_png": b"\xff\xd8\xff" + b"0" * 100, "width": 10, "height": 10, "text": None}]
+    result = extraction.extract_document(fake, "gpt-4o", pages, kind=None)
+    assert result.kind == "medication_list"
+    assert [c["purpose"] for c in result.calls] == ["classify", "extract:other", "extract:medication_list"]
+    names = [i["payload"]["name"] for i in result.items if i["item_type"] == "medication"]
+    assert names == ["Apixaban / Apixaget", "Metformin XR"]
+    assert result.items[1]["payload"]["low_confidence_fields"] == ["frequency"]
+    assert "medication_list" in extraction.SCHEMA_FOR_KIND and extraction.SCHEMA_FOR_KIND["medication_list"] is PrescriptionDocument
+    import documents
+    assert documents.model_reading(result) == "2 medicines, from Dr. Khan, dated 2026-09-01" or documents.model_reading(result).startswith("2 medicines")
