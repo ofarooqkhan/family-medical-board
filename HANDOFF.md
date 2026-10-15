@@ -612,6 +612,21 @@ emails were cleared by the fixed revision. The workspace was synced to main at
 changes). The real OpenAI path was verified there: `classify()` on a
 generated prescription PDF returned kind prescription, date 2026-09-01,
 1419 input and 42 output tokens on gpt-4o through the Replit integration.
+Full flow verified on the live
+database with the real model on 2026-10-15 by `tests/e2e/live_check.py`
+(temporary account and patient, deleted afterwards): a generated
+prescription and lab report extracted with every item at confidence 1.0
+and linked to document and page, confirmation filled the medication list
+and values, the board answered a record question (pharmacist routed,
+about 4000 tokens, 1.6 cents) and declined a dosing question, brief and
+PDF rendered. Cost of the whole check: about 4 cents. One tuning note:
+the pharmacist marked the record question as an advice request on its
+own, so the redirect banner showed above a correct answer; loosen the
+specialist prompt wording in item 11's next pass.
+The owner's first signup failed with "account already exists" because the
+kept legacy row had the owner's email and no password; signup now claims
+such rows (`d2b1b62`), and a Forgot password tab works with a
+`PASSWORD_RESET_SECRET` secret the owner sets in Replit.
 Two production bugs found on Replit and fixed on main: structured outputs
 on the 1.x OpenAI SDK (`13eb362`) and stale pooled connections dropped by
 the hosted Postgres (`2220bc6`, ping plus keepalives). Keep the workspace
