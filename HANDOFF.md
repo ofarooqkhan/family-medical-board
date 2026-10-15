@@ -662,15 +662,14 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
-### 8.0r Rounds 11 and 12 synced in the Repl, publish pending (2026-10-15)
-`38d4ab7` (main: the memory-note round 0009 plus the board rewrite)
-was pulled into the Repl by Replit Agent (its commit `2db35de` adds only
-a SYNC9.txt marker on top), development database at 0009, app running.
-`publish_app` from the connector was blocked by the Claude Code session's
-production-deploy guard, so the republish is the owner's: open the Repl,
-press Republish, and approve the database review (migration 0009 adds
-`doctor_memory.event_date`; the board round itself changes no schema).
-Never choose the copy-development-to-production option.
+### 8.0r Rounds 11 and 12 synced, awaiting the owner's Republish (2026-10-15)
+Two sessions push to main: this one (rounds 1 to 11) and
+`claude/gifted-volta-g7i908` (round 12, the board as a meeting). Merged
+main `38d4ab7` passes 153 tests locally and in CI. The Repl is synced to
+it. `publish_app` is refused because migration 0009 changed the schema;
+the owner presses Republish on replit.com and approves the review (one
+new column, event_date, on doctor_memory). Not yet done with a real key:
+a live board run to tune round 12's four prompts.
 
 ### 8.0q Round 12: the board runs as a meeting (2026-10-15)
 Owner's finding: the specialists asked a fixed-feeling batch of irrelevant
