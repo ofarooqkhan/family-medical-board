@@ -157,8 +157,9 @@ def main() -> int:
     if "--ingest" in sys.argv:
         ingest_round_trip(p, provider, audio)
     p(f"ALL STEPS OK in {time.time() - t0:.0f}s")
-    if len(sys.argv) > 1:
-        with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    outputs = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if outputs:
+        with open(outputs[0], "w", encoding="utf-8") as fh:
             fh.write("\n".join(out))
     return 0
 
