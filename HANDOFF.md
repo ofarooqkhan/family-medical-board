@@ -660,6 +660,19 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0p Round 11: one memory note per document, by its date (2026-10-15)
+Owner: memory was storing each extracted item on its own; a report
+should be one collated entry placed by its date. Done: confirm_item no
+longer writes per-item notes; `documents.document_memory` writes one
+note per document (kind, date, issuer, medicines or results with flags
+or findings), routed to the pharmacist (prescriptions, medication
+lists), radiologist (imaging) or general duty (labs, letters, logs),
+with `event_date` = the document's date (migration 0009). Reading a
+document again supersedes the earlier note. Conversation notes carry
+the visit date. The Memory page and the specialists' note lists are
+ordered by that date. Older per-item notes on the live database are not
+touched; the admin can clear them from the Memory page.
+
 ### 8.0o Round 10 live (2026-10-15)
 `64f99bc` synced and republished from the connector; deployment running.
 
