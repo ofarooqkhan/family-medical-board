@@ -303,6 +303,25 @@ def test_extracted_items_review_flow(accounts):
     assert [p["page_number"] for p in pages] == [1, 2]
 
 
+def test_pool_recovers_when_the_server_drops_the_connection(migrated):
+    """Hosted Postgres closes idle sessions; the next query must not fail."""
+    with migrated.db_cursor() as cur:
+        cur.execute("SELECT pg_backend_pid() AS pid")
+        pid = cur.fetchone()["pid"]
+    # Kill that backend from a separate raw connection, as the server would on idle timeout.
+    conn = _raw()
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("SELECT pg_terminate_backend(%s)", (pid,))
+    cur.close()
+    conn.close()
+    # The pool still holds the dead connection; the next call must replace it transparently.
+    assert len(migrated.get_doctor_agents(active_only=False)) == 15
+    with migrated.db_cursor() as cur:
+        cur.execute("SELECT pg_backend_pid() AS pid")
+        assert cur.fetchone()["pid"] != pid
+
+
 def test_pool_serves_more_threads_than_connections(migrated):
     errors = []
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -46,6 +47,12 @@ def database_url() -> str:
     return url
 
 
+# TCP keepalives so hosted Postgres (Neon behind Replit, Render) does not drop
+# idle SSL sessions under us between two page loads.
+_CONNECT_KWARGS = dict(cursor_factory=RealDictCursor, keepalives=1, keepalives_idle=30,
+                       keepalives_interval=10, keepalives_count=3, connect_timeout=15)
+
+
 def _get_pool() -> pg_pool.ThreadedConnectionPool:
     global _pool, _pool_url
     url = database_url()
@@ -53,9 +60,41 @@ def _get_pool() -> pg_pool.ThreadedConnectionPool:
         if _pool is None or _pool.closed or _pool_url != url:
             if _pool is not None and not _pool.closed:
                 _pool.closeall()
-            _pool = pg_pool.ThreadedConnectionPool(POOL_MIN, POOL_MAX, url, cursor_factory=RealDictCursor)
+            last_error = None
+            for attempt in range(3):  # a sleeping hosted database can refuse the first connect
+                try:
+                    _pool = pg_pool.ThreadedConnectionPool(POOL_MIN, POOL_MAX, url, **_CONNECT_KWARGS)
+                    break
+                except psycopg2.OperationalError as e:
+                    last_error = e
+                    time.sleep(1.5 * (attempt + 1))
+            else:
+                raise last_error  # type: ignore[misc]
             _pool_url = url
         return _pool
+
+
+def _checkout(p: pg_pool.ThreadedConnectionPool):
+    """Get a pooled connection that is known to be alive.
+
+    A connection that sat idle may have been closed by the server without the
+    client noticing (the first query then fails with "SSL connection has been
+    closed unexpectedly"). Ping it first; replace it once if the ping fails.
+    """
+    last_error = None
+    for attempt in range(2):
+        conn = p.getconn()
+        try:
+            if conn.closed:
+                raise psycopg2.InterfaceError("connection already closed")
+            with conn.cursor() as ping:
+                ping.execute("SELECT 1")
+            conn.rollback()
+            return conn
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            last_error = e
+            p.putconn(conn, close=True)
+    raise last_error  # type: ignore[misc]
 
 
 def close_pool() -> None:
@@ -73,12 +112,9 @@ def db_cursor(commit: bool = False) -> Iterator[Any]:
         raise RuntimeError(f"no database connection became free within {POOL_WAIT_SECONDS}s")
     try:
         p = _get_pool()
-        conn = p.getconn()
+        conn = _checkout(p)
         broken = False
         try:
-            if conn.closed:
-                p.putconn(conn, close=True)
-                conn = p.getconn()
             cur = conn.cursor()
             try:
                 yield cur
