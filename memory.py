@@ -109,8 +109,8 @@ def notes_block(patient_id: int, user: dict, agent_type: str, query: str = "") -
         return ""
     lines = [f"\nYOUR OWN EARLIER NOTES ({agent_type}), most relevant first:"]
     for n in notes:
-        when = n["created_at"].strftime("%Y-%m-%d") if isinstance(n.get("created_at"), _dt.datetime) else ""
-        lines.append(f"- ({when}) {n['content'][:300]}")
+        when = n.get("event_date") or (n["created_at"].date() if isinstance(n.get("created_at"), _dt.datetime) else "")
+        lines.append(f"- ({when}) {n['content'][:400]}")
     return "\n".join(lines)
 
 
@@ -201,14 +201,16 @@ def record_consultation(patient_id: int, user: dict, summary: dict, consultation
     if doctor:
         text = f"{doctor}" + (f" ({summary['doctor_specialty']})" if summary.get("doctor_specialty") else "") + f" saw the patient on {when}."
         ids.append(db.save_doctor_memory(patient_id, user, db.SHARED_AGENT, "fact", text, importance=5,
-                                         source_consultation_id=consultation_id, source_file_id=file_id, category="doctor"))
+                                         source_consultation_id=consultation_id, source_file_id=file_id, category="doctor",
+                                         event_date=happened_on))
     for a in summary.get("actions", []):
         if a.get("kind") in ("monitoring", "test", "medication", "lifestyle", "referral") and (a.get("confidence") or 0) >= 0.6:
             who = f"{doctor} asked" if doctor else "The doctor asked"
             text = f"{who} on {when}: {a.get('text')}" + (f" ({a['when']})" if a.get("when") else "")
             ids.append(db.save_doctor_memory(patient_id, user, db.SHARED_AGENT, "standing_instruction", text, importance=6,
-                                             source_consultation_id=consultation_id, source_file_id=file_id, category="instruction"))
+                                             source_consultation_id=consultation_id, source_file_id=file_id, category="instruction",
+                                             event_date=happened_on))
     memo = f"Doctor conversation on {when}" + (f" with {doctor}" if doctor else "") + f": {summary.get('summary', '')}"
     ids.append(db.save_doctor_memory(patient_id, user, "general_duty", "consultation", memo[:900], importance=5,
-                                     source_file_id=file_id, source_consultation_id=consultation_id))
+                                     source_file_id=file_id, source_consultation_id=consultation_id, event_date=happened_on))
     return ids

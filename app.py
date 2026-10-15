@@ -1340,7 +1340,8 @@ def _memory_card(m: dict, pid: int, u: dict, editable: bool, names: dict, show_c
     with st.container(border=True):
         kind = (m.get("category") or m["memory_type"]).replace("_", " ")
         confirmed = f", still true on {_when(m['last_confirmed_at'])[:11]}" if m.get("last_confirmed_at") else ""
-        st.caption(f"{_when(m['created_at'])}, {kind}" + (", from " + ", ".join(src) if src else "")
+        dated = f"dated {m['event_date']}" if m.get("event_date") else f"noted {_when(m['created_at'])[:11]}"
+        st.caption(f"{dated}, {kind}" + (", from " + ", ".join(src) if src else "")
                    + (", edited" if m.get("updated_at") else "") + confirmed)
         if not editable:
             st.write(m["content"])

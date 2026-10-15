@@ -132,6 +132,10 @@ def run_extraction(patient_id: int, file_id: int, user: dict, provider: Provider
     db.set_document_extraction(file_id, patient_id, user, extraction=result.model_dump(), model=model,
                                document_kind=result.kind, document_date=doc_date)
     summary["read_as"] = model_reading(result)
+    try:
+        summary["memory_id"] = document_memory(patient_id, file_id, user, result, doc_date)
+    except Exception:  # a memory failure must not lose the extraction
+        summary["memory_id"] = None
     _discard_pending(patient_id, file_id, user)
     ids = db.add_extracted_items(patient_id, file_id, user, result.items)
     summary.update({"kind": result.kind, "items": len(ids), "item_ids": ids, "calls": result.calls,
@@ -141,6 +145,69 @@ def run_extraction(patient_id: int, file_id: int, user: dict, provider: Provider
     else:
         summary["to_check"] = [item_label(i) for i in db.list_extracted_items(patient_id, user, file_id=file_id, status="pending")]
     return summary
+
+
+DOCUMENT_AGENT = {
+    "prescription": "pharmacist", "medication_list": "pharmacist", "lab_report": "general_duty",
+    "imaging_report": "radiologist", "discharge_summary": "general_duty", "vitals_log": "general_duty", "other": "general_duty",
+}
+
+
+def document_memory(patient_id: int, file_id: int, user: dict, result, doc_date) -> int:
+    """One collated note per document: what it is, its date, who issued it, and
+    everything read from it, so a report stays one thing in memory, placed by
+    its own date. Reading the document again replaces the earlier note."""
+    d = result.document or {}
+    kind = result.kind
+    label = KIND_LABELS.get(kind, kind)
+    when = doc_date.isoformat() if doc_date else "undated"
+    head = f"{label}, {when}"
+    issuer = d.get("prescriber") or d.get("clinic") or d.get("lab_name") or d.get("ordering_doctor") or d.get("author") or d.get("radiologist")
+    if issuer:
+        head += f", from {issuer}"
+    parts: list[str] = []
+    if kind in ("prescription", "medication_list"):
+        meds = [" ".join(x for x in (m.get("name"), m.get("dose"), m.get("frequency")) if x) for m in d.get("medications") or []]
+        if meds:
+            parts.append("Medicines: " + "; ".join(meds))
+        if d.get("diagnoses"):
+            parts.append("Diagnoses: " + "; ".join(d["diagnoses"]))
+    elif kind == "lab_report":
+        vals = []
+        for v in d.get("values") or []:
+            val = v.get("numeric_value") if v.get("numeric_value") is not None else v.get("value_text")
+            flag = f" ({v['flag']})" if v.get("flag") and v["flag"] not in ("normal", "unknown") else ""
+            vals.append(f"{v.get('test_name')} {val} {v.get('unit') or ''}".strip() + flag)
+        if vals:
+            parts.append("Results: " + "; ".join(vals))
+        if d.get("comments"):
+            parts.append("Comments: " + str(d["comments"]))
+    elif kind == "imaging_report":
+        study = " ".join(x for x in (d.get("modality"), d.get("body_part")) if x)
+        if study:
+            parts.append("Study: " + study)
+        findings = [f.get("text") for f in d.get("items") or [] if f.get("text")]
+        if findings:
+            parts.append("Findings: " + " ".join(findings))
+    elif kind == "vitals_log":
+        readings = d.get("readings") or []
+        parts.append(f"{len(readings)} readings" + (": " + "; ".join(
+            f"{r.get('kind')} {r.get('value') or (str(r.get('systolic')) + '/' + str(r.get('diastolic')))} on {r.get('recorded_at') or '?'}"
+            for r in readings[:12]) if readings else ""))
+    else:
+        if d.get("summary"):
+            parts.append(str(d["summary"]))
+        facts = [f"{f.get('label')}: {f.get('value')}" for f in d.get("facts") or []]
+        if facts:
+            parts.append("Facts: " + "; ".join(facts))
+        if d.get("medications_mentioned"):
+            parts.append("Medicines mentioned: " + ", ".join(d["medications_mentioned"]))
+    text = head + ". " + " ".join(parts) if parts else head + "."
+    agent = DOCUMENT_AGENT.get(kind, "general_duty")
+    new_id = db.save_doctor_memory(patient_id, user, agent, "document", text[:1900], importance=6, source_file_id=file_id,
+                                   category="record", event_date=doc_date)
+    db.supersede_document_memories(patient_id, user, file_id, new_id)
+    return new_id
 
 
 def model_reading(result) -> str:
@@ -235,10 +302,8 @@ def confirm_item(item_id: int, patient_id: int, user: dict, payload: dict[str, A
         out["appointment_id"] = appts.add_appointment(
             patient_id, user, payload.get("title") or "Follow-up", starts, kind=payload.get("kind") or "visit",
             doctor_name=payload.get("doctor_name"), specialty=payload.get("specialty"), notes=payload.get("notes"))
-    elif kind in ("imaging_finding", "diagnosis", "fact"):
-        text = payload.get("text") or f"{payload.get('label', '')}: {payload.get('value', '')}"
-        doctor = {"imaging_finding": "radiologist", "diagnosis": "general_duty", "fact": "general_duty"}[kind]
-        db.save_doctor_memory(patient_id, user, doctor, kind, text, importance=6, source_file_id=item["file_id"])
+    # Findings, diagnoses and facts live in the document's single collated memory
+    # note (see document_memory); confirming them records the item only.
     db.set_extracted_item_status(item_id, patient_id, user, "confirmed", payload=payload)
     _maybe_mark_reviewed(patient_id, item["file_id"], user)
     return out

@@ -244,3 +244,44 @@ def test_item_labels_and_confirmable():
     assert documents.confirmable({"item_type": "lab_value", "payload": {"numeric_value": None}}) is False
     assert documents.confirmable({"item_type": "medication", "payload": {"name": "x"}}) is True
     assert documents.confirmable({"item_type": "appointment", "payload": {}}) is False
+
+
+def test_one_collated_memory_note_per_document_dated_by_the_report(accounts):
+    """Owner's rule: a report is one thing in memory, placed by its own date,
+    not a scatter of per-item notes."""
+    import database as db
+    import memory
+    ed = accounts["editor"]
+    pid = _patient(accounts)
+    lab = {"lab_name": "Chughtai Lab", "ordering_doctor": "Dr. Khan", "patient_name": None, "document_date": "2026-09-05",
+           "comments": None, "overall_confidence": 0.9,
+           "values": [{"test_name": "HbA1c", "value_text": "7.8", "numeric_value": 7.8, "unit": "%", "reference_range": "4.0-5.6",
+                       "flag": "high", "collected_at": None, "page": 1, "confidence": 0.95, "low_confidence_fields": []},
+                      {"test_name": "Creatinine", "value_text": "1.3", "numeric_value": 1.3, "unit": "mg/dL", "reference_range": "0.6-1.2",
+                       "flag": "high", "collected_at": None, "page": 1, "confidence": 0.9, "low_confidence_fields": []}]}
+    fake = FakeProvider(responses={LabReportDocument: lab})
+    out = documents.ingest_upload(pid, ed, "lab.pdf", "application/pdf", make_pdf(["Lab"]), fake, kind="lab_report", auto_add=True)
+    notes = [m for m in db.list_doctor_memories(pid, ed) if m["source_file_id"] == out["file_id"]]
+    assert len(notes) == 1, [n["content"] for n in notes]
+    n = notes[0]
+    assert n["memory_type"] == "document" and n["doctor_type"] == "general_duty" and n["status"] == "active"
+    assert str(n["event_date"]) == "2026-09-05"
+    assert n["content"].startswith("Lab report, 2026-09-05, from Chughtai Lab")
+    assert "HbA1c 7.8 % (high)" in n["content"] and "Creatinine 1.3 mg/dL (high)" in n["content"]
+    assert out["memory_id"] == n["id"]
+    # The specialist sees it under the report's date.
+    block = memory.notes_block(pid, ed, "general_duty", "kidney")
+    assert "(2026-09-05)" in block and "Creatinine" in block
+    # Reading the document again replaces the note instead of adding a second one.
+    documents.run_extraction(pid, out["file_id"], ed, fake, kind="lab_report", auto_add=True)
+    all_notes = [m for m in db.list_doctor_memories(pid, ed) if m["source_file_id"] == out["file_id"]]
+    assert len(all_notes) == 2 and sorted(m["status"] for m in all_notes) == ["active", "superseded"]
+    assert [m for m in all_notes if m["status"] == "superseded"][0]["superseded_by"] == [m for m in all_notes if m["status"] == "active"][0]["id"]
+    # A prescription goes to the pharmacist with its medicines in one line.
+    fake_rx = FakeProvider(responses={PrescriptionDocument: RX})
+    out2 = documents.ingest_upload(pid, ed, "rx.pdf", "application/pdf", make_pdf(["Rx"]), fake_rx, kind="prescription", auto_add=True)
+    rx_note = [m for m in db.list_doctor_memories(pid, ed) if m["source_file_id"] == out2["file_id"]]
+    assert len(rx_note) == 1 and rx_note[0]["doctor_type"] == "pharmacist" and "Medicines: " in rx_note[0]["content"]
+    assert rx_note[0]["content"].startswith("Prescription, 2026-09-01, from Dr. Khan")
+    # No per-item notes for diagnoses any more.
+    assert not any(m["memory_type"] == "diagnosis" for m in db.list_doctor_memories(pid, ed))

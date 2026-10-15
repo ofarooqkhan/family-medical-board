@@ -611,19 +611,30 @@ LESSON_AGENT = "family"
 
 def save_doctor_memory(patient_id: int | None, user: dict, doctor_type: str, memory_type: str, content: str,
                        importance: int = 5, source_file_id: int | None = None, source_run_id: int | None = None,
-                       source_consultation_id: int | None = None, category: str | None = None) -> int:
+                       source_consultation_id: int | None = None, category: str | None = None, event_date=None) -> int:
     """One agent remembers one thing about one patient. Every memory records
-    who or what produced it so a wrong one can be traced and removed."""
+    who or what produced it so a wrong one can be traced and removed, and the
+    date of the thing it describes (event_date) so notes line up in time."""
     require_role(user, "viewer")
     with db_cursor(commit=True) as cur:
         if patient_id is not None:
             _assert_patient(cur, patient_id)
         cur.execute("""INSERT INTO doctor_memory (patient_id, doctor_type, memory_type, content, importance, source_file_id,
-                                                  source_run_id, source_consultation_id, created_by, category, status)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active') RETURNING id""",
+                                                  source_run_id, source_consultation_id, created_by, category, status, event_date)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s) RETURNING id""",
                     (patient_id, doctor_type, memory_type, content[:2000], importance, source_file_id, source_run_id,
-                     source_consultation_id, (user or {}).get("id"), category))
+                     source_consultation_id, (user or {}).get("id"), category, event_date))
         return cur.fetchone()["id"]
+
+
+def supersede_document_memories(patient_id: int, user: dict, file_id: int, new_id: int) -> int:
+    """A document was read again: its earlier note steps aside for the new one."""
+    require_role(user, "viewer")
+    with db_cursor(commit=True) as cur:
+        cur.execute("""UPDATE doctor_memory SET status = 'superseded', superseded_by = %s, updated_at = CURRENT_TIMESTAMP
+                       WHERE patient_id = %s AND source_file_id = %s AND memory_type = 'document' AND status = 'active' AND id <> %s""",
+                    (new_id, patient_id, file_id, new_id))
+        return cur.rowcount
 
 
 def get_doctor_memories(patient_id: int, user: dict, doctor_type: str | None = None, limit: int = 50):
@@ -646,7 +657,7 @@ def list_doctor_memories(patient_id: int, user: dict, limit: int = 500, include_
         cur.execute(f"""SELECT m.*, u.display_name AS created_by_name
                         FROM doctor_memory m LEFT JOIN users u ON u.id = m.created_by
                         WHERE m.patient_id = %s {"" if include_superseded else "AND m.status = 'active'"}
-                        ORDER BY m.created_at DESC, m.id DESC LIMIT %s""", (patient_id, limit))
+                        ORDER BY COALESCE(m.event_date, m.created_at::date) DESC, m.created_at DESC, m.id DESC LIMIT %s""", (patient_id, limit))
         return cur.fetchall()
 
 

@@ -107,7 +107,7 @@ app with a basic layer first, then deep dive into orchestration and iterate.
   people and invites. Clerk dropped at the owner's request.
 - Item 7: `api.py` FastAPI over the same service functions, bearer tokens.
 - Items 8, 9, 10, 11: `board.py`. Runs as a multidisciplinary meeting
-  (round 11, section 8.0p): chair triage, per-role record slices, findings,
+  (round 12, section 8.0q): chair triage, per-role record slices, findings,
   a discussion round, chair synthesis with plan state carried between runs.
   Pharmacist gets deterministic duplicate and multi-prescriber flags from
   `medications.find_duplicates`; keyword routing with whole-word domains is
@@ -662,7 +662,7 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
-### 8.0p Round 11: the board runs as a meeting (2026-10-15)
+### 8.0q Round 12: the board runs as a meeting (2026-10-15)
 Owner's finding: the specialists asked a fixed-feeling batch of irrelevant
 questions. Cause: no agent heard another, every specialist got the same
 24k-char record dump with "review everything in your domain", the schema
@@ -715,6 +715,18 @@ follow-up rendering, continuity and plan state across three runs, and the
 direct-answer path; 152 tests pass; demo-mode smoke passes. Not yet done
 with a real key: a live run to tune the four prompts (section 8.0's note
 on the pharmacist flagging advice on its own still applies).
+### 8.0p Round 11: one memory note per document, by its date (2026-10-15)
+Owner: memory was storing each extracted item on its own; a report
+should be one collated entry placed by its date. Done: confirm_item no
+longer writes per-item notes; `documents.document_memory` writes one
+note per document (kind, date, issuer, medicines or results with flags
+or findings), routed to the pharmacist (prescriptions, medication
+lists), radiologist (imaging) or general duty (labs, letters, logs),
+with `event_date` = the document's date (migration 0009). Reading a
+document again supersedes the earlier note. Conversation notes carry
+the visit date. The Memory page and the specialists' note lists are
+ordered by that date. Older per-item notes on the live database are not
+touched; the admin can clear them from the Memory page.
 
 ### 8.0o Round 10 live (2026-10-15)
 `64f99bc` synced and republished from the connector; deployment running.
