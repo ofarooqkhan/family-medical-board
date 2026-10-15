@@ -55,7 +55,7 @@ EXPECTED_TABLES = {
     "medication_changes", "appointments", "board_runs", "sessions", "consultations",
 }
 
-HEAD = "0008"
+HEAD = "0009"
 
 
 def _raw():
@@ -445,4 +445,4 @@ def test_upgrade_tolerates_a_schema_already_synced_by_the_host(db):
     assert db.migration_plan()["current_revision"] == HEAD
     assert _tables() == EXPECTED_TABLES
     cols = {r[0] for r in _query("SELECT column_name FROM information_schema.columns WHERE table_name = 'doctor_memory'")}
-    assert {"source_run_id", "source_consultation_id", "created_by", "updated_at", "updated_by", "status", "category"} <= cols
+    assert {"source_run_id", "source_consultation_id", "created_by", "updated_at", "updated_by", "status", "category", "event_date"} <= cols
