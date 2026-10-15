@@ -5,3 +5,39 @@ address = "0.0.0.0"
 enableCORS = false
 enableXsrfProtection = false
 enableStaticServing = true
+
+# Warm, calm light theme. Colours are chosen for contrast on a cream
+# background (body text 11.3:1, muted text 5.6:1, white on primary 6.2:1).
+[theme]
+base = "light"
+primaryColor = "#2F6B66"
+backgroundColor = "#FBF7F1"
+secondaryBackgroundColor = "#F3ECE2"
+textColor = "#3B3530"
+linkColor = "#245E59"
+linkUnderline = true
+borderColor = "#E4D9CA"
+dataframeBorderColor = "#E4D9CA"
+dataframeHeaderBackgroundColor = "#F3ECE2"
+codeBackgroundColor = "#F3ECE2"
+showWidgetBorder = true
+showSidebarBorder = false
+baseRadius = "0.75rem"
+buttonRadius = "0.75rem"
+baseFontSize = 17
+baseFontWeight = 400
+# Nunito is loaded from Google Fonts; if it fails to load the browser falls
+# back to the generic sans-serif stack declared in ui.py.
+font = "Nunito:https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700&display=swap"
+headingFont = "Nunito"
+headingFontSizes = ["1.85rem", "1.4rem", "1.2rem", "1.05rem", "1rem", "0.95rem"]
+headingFontWeights = [700, 700, 700, 600, 600, 600]
+metricValueFontSize = "2rem"
+metricValueFontWeight = 700
+chartCategoricalColors = ["#2F6B66", "#C47A52", "#7A8B5C", "#9B6B9E", "#5B7FA6", "#B8884A"]
+
+[theme.sidebar]
+backgroundColor = "#F3ECE2"
+secondaryBackgroundColor = "#FBF7F1"
+borderColor = "#E4D9CA"
+headingFontSizes = ["1.25rem", "1.1rem", "1rem", "0.95rem", "0.9rem", "0.85rem"]
