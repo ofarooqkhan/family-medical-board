@@ -662,6 +662,16 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0r Rounds 11 and 12 synced in the Repl, publish pending (2026-10-15)
+`38d4ab7` (main: the memory-note round 0009 plus the board rewrite)
+was pulled into the Repl by Replit Agent (its commit `2db35de` adds only
+a SYNC9.txt marker on top), development database at 0009, app running.
+`publish_app` from the connector was blocked by the Claude Code session's
+production-deploy guard, so the republish is the owner's: open the Repl,
+press Republish, and approve the database review (migration 0009 adds
+`doctor_memory.event_date`; the board round itself changes no schema).
+Never choose the copy-development-to-production option.
+
 ### 8.0q Round 12: the board runs as a meeting (2026-10-15)
 Owner's finding: the specialists asked a fixed-feeling batch of irrelevant
 questions. Cause: no agent heard another, every specialist got the same
