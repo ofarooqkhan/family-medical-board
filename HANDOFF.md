@@ -660,6 +660,20 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0h Round 7 live (2026-10-15)
+`ddc4a49` (delete a wrong conversation from the top of its record, with
+confirmation) and `ad6eac3` (summaries use the patient's first name)
+were synced and republished from the connector; `publish_app` works
+again now that the schemas match. Live deployment status: running.
+The production live checks could not be run from the workspace: the
+Replit Agent has no production connection string. Production is
+exercised only through the published app itself.
+Agent memory today: append-only notes per run (review per specialist,
+board summary, consultation, confirmed diagnosis or finding), the top 15
+by importance shown to every specialist in build_context, editable on
+the Memory page. No consolidation, no per-agent retrieval, no feedback
+loop yet; design questions put to the owner (task 19).
+
 ### 8.0g Conversations flow verified with the real model (2026-10-15)
 `tests/e2e/make_visit_audio.py` speaks a doctor and family exchange with
 the espeak-ng library from the `espeakng-loader` wheel (34 s, two
