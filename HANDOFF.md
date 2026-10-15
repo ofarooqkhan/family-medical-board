@@ -124,8 +124,8 @@ app with a basic layer first, then deep dive into orchestration and iterate.
   `docs/screenshots/`.
 
 ### Not done
-- Deployment itself. Nothing is hosted. The owner connects the GitHub repo
-  to Render (or runs docker compose). See section 8.
+- Hosted on Replit (section 8.0). Render, Railway, and docker compose remain
+  as alternatives in the README.
 - Anthropic provider (item 17 second half): add `AnthropicProvider` in
   `providers.py` when the owner adds a key; the owner's model choice is
   Sonnet for extraction and specialists, Opus coordinator, Haiku router.
@@ -603,7 +603,18 @@ Credentials and ids:
 
 ## 8. Next step: get it hosted, then real-model runs
 
-### 8.0 What happened with Replit (2026-10-12, end of session)
+### 8.0 Live on Replit (2026-10-15)
+Published at https://medical-board-history.replit.app (Autoscale, replId
+`0910c133-b692-4c80-b4d8-39d37884f87b`). The live database migrated to
+revision 0003 with the five existing patients kept; duplicate dev-login
+emails were cleared by the fixed revision. The Replit workspace carries two
+small edits applied by Replit Agent that match commits `484e1ac` and
+`13eb362` on main; keep the workspace and main in step by pulling main in
+the Repl before the next publish. Creating new Repls needs a subscription
+the account lacks; updating this one works, slowly, through Replit Agent.
+The connector's publish_app republishes after changes.
+
+### 8.0a Earlier Replit notes (2026-10-12)
 The session used the Replit connector to sync the repo into the existing
 Repl `medical-board-history` (replId `0910c133-b692-4c80-b4d8-39d37884f87b`).
 Result:

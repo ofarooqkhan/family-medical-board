@@ -8,6 +8,8 @@ To run: create a virtualenv, `python3 -m pip install -r requirements.txt`, set `
 
 ## Deploy
 
+The family's instance runs at https://medical-board-history.replit.app (Replit Autoscale, managed Postgres, Replit OpenAI integration). The paths below are alternatives.
+
 Three ways to get a running copy. Each uses the same Dockerfile and runs the
 database migrations itself at startup.
 
