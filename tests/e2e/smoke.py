@@ -96,23 +96,22 @@ with sync_playwright() as pw:
     page.get_by_role("button", name="Upload and extract").click()
     wait_idle(page, 4000)
     shot(page, "04-documents-review")
-    html = page.content()
-    assert "Check extracted items" in html and "Metformin (demo)" in html, "review items present"
-    assert "Confirm all" in html
-
-    # Confirm the high-confidence items, reject the other.
-    page.get_by_role("button", name=re.compile("Confirm all")).click()
-    wait_idle(page, 2500)
-    html = page.content()
-    assert "Metformin (demo)" not in html.split("All documents")[0] or "Amlodipine (demo)" in html
+    text = page.inner_text("body")
+    # The sure item was added on its own and the summary says so; the unsure one waits.
+    assert "What was read" in text and "Added to the record" in text and "Metformin (demo)" in text, text[:1200]
+    assert "Needs a look" in text and "Amlodipine (demo)" in text
+    assert page.get_by_role("button", name="Reject").count() >= 1
     for _ in range(5):
         reject = page.get_by_role("button", name="Reject")
         if not reject.count():
             break
         reject.first.click()
         wait_idle(page, 2000)
+    page.get_by_role("button", name="Dismiss").click()
+    wait_idle(page, 1500)
     shot(page, "05-documents-done")
-    assert "Nothing waiting for review" in page.content()
+    text = page.inner_text("body")
+    assert "Nothing waiting" in text and "What was read" not in text
 
     nav(page, "Medications")
     shot(page, "06-medications")
@@ -146,10 +145,8 @@ with sync_playwright() as pw:
     wait_idle(page, 4000)
     shot(page, "07c-conversation")
     text = page.inner_text("body")
-    assert "Diabetes review with Dr. Demo" in text and "waiting for your confirmation" in text, text[:800]
-    assert page.get_by_role("button", name="Confirm").count() >= 1
-    page.get_by_role("button", name="Confirm").first.click()
-    wait_idle(page, 2000)
+    assert "Diabetes review with Dr. Demo" in text and "Added to the record: Metformin (demo)" in text, text[:800]
+    assert page.get_by_role("button", name="Confirm").count() == 0
     page.get_by_text("Diabetes review with Dr. Demo").first.click()
     wait_idle(page, 800)
     text = page.inner_text("body")

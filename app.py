@@ -453,12 +453,9 @@ def page_documents() -> None:
                     except Exception as e:
                         _denied(e)
                         continue
-                if out.get("error"):
-                    st.error(f"{name}: stored, but extraction failed: {out['error']}")
-                elif provider is None:
-                    st.warning(f"{name}: stored ({out['pages']} pages). No model key, so nothing was extracted.")
-                else:
-                    st.success(f"{name}: {out['pages']} pages, {out['items']} items found as {KINDS.get(out['kind'], out['kind'])}. Review them below.")
+                if provider is None and not out.get("error"):
+                    out["error"] = "no model key is configured, so nothing was read"
+                _note_upload(name, out)
             st.rerun()
     st.divider()
     _review_section(pid)
@@ -466,14 +463,50 @@ def page_documents() -> None:
     _document_list(pid, provider)
 
 
+def _note_upload(name: str, out: dict) -> None:
+    """Keep what an upload did so the summary survives the rerun."""
+    st.session_state.setdefault("upload_summaries", []).append({
+        "name": name, "added": out.get("added") or [], "to_check": out.get("to_check") or [],
+        "error": out.get("error"), "kind": out.get("kind"), "pages": out.get("pages"),
+    })
+
+
+def _show_upload_summaries() -> None:
+    notes = st.session_state.get("upload_summaries") or []
+    if not notes:
+        return
+    st.subheader("What was read")
+    for n in notes:
+        with st.container(border=True):
+            head = f"**{n['name']}**" + (f", {KINDS.get(n.get('kind'), n.get('kind'))}" if n.get("kind") else "")
+            st.markdown(head)
+            if n.get("error"):
+                st.error(f"Stored, but reading it failed: {n['error']}")
+                continue
+            if n["added"]:
+                st.markdown("Added to the record:")
+                for x in n["added"]:
+                    st.markdown(f"- {x}")
+            if n["to_check"]:
+                st.markdown("Needs a look before it joins the record (the model was not sure):")
+                for x in n["to_check"]:
+                    st.markdown(f"- {x}")
+            if not n["added"] and not n["to_check"]:
+                st.caption("Nothing to add was found on these pages.")
+    if st.button("Dismiss", key="dismiss_upload_summaries"):
+        st.session_state.pop("upload_summaries", None)
+        st.rerun()
+
+
 def _review_section(pid: int) -> None:
     u = _user()
+    _show_upload_summaries()
     grouped = documents.pending_review(pid, u)
-    st.subheader("Check extracted items against the original")
+    st.subheader("Needs a look")
     if not grouped:
-        st.caption("Nothing waiting for review.")
+        st.caption("Nothing waiting. Items the model was sure about are added on their own; only unsure ones stop here.")
         return
-    st.caption("Nothing is saved to the record until you confirm it here. Correct any field first if needed.")
+    st.caption("The model was not sure about these. Correct a field if needed, then confirm or reject.")
     _review_items(pid, grouped)
 
 
@@ -514,13 +547,7 @@ def _review_items(pid: int, grouped: dict) -> None:
 
 
 def _confirmable(item: dict) -> bool:
-    if item["item_type"] == "lab_value":
-        return item["payload"].get("numeric_value") is not None
-    if item["item_type"] == "vital":
-        return bool(extraction_rows(item["payload"]))
-    if item["item_type"] == "medication":
-        return bool(item["payload"].get("name"))
-    return True
+    return documents.confirmable(item)
 
 
 def _item_editor(it: dict, pid: int, editable: bool) -> None:
@@ -609,6 +636,12 @@ def _document_list(pid: int, provider) -> None:
             c3.write(f"Model: {d.get('extraction_model') or 'none'}")
             if d.get("extraction_error"):
                 st.error(d["extraction_error"])
+            read = [i for i in db.list_extracted_items(pid, u, file_id=d["id"]) if i["status"] in ("confirmed", "pending")]
+            if read:
+                st.markdown("**What was read from it**")
+                for i in read:
+                    mark = "added" if i["status"] == "confirmed" else "needs a look"
+                    st.markdown(f"- {documents.item_label(i)} ({mark})")
             pages = db.get_document_pages(d["id"], pid, u)
             cols = st.columns(min(3, max(1, len(pages))))
             for i, pg in enumerate(pages[:6]):
@@ -620,9 +653,9 @@ def _document_list(pid: int, provider) -> None:
             if _can("editor"):
                 b1, b2 = st.columns(2)
                 if provider is not None and b1.button("Extract again", key=f"re_{d['id']}"):
-                    with st.spinner("Extracting..."):
+                    with st.spinner("Reading again..."):
                         out = documents.run_extraction(pid, d["id"], u, provider, kind=None)
-                    st.success(f"{out['items']} items queued for review." if not out.get("error") else out["error"])
+                    _note_upload(d["filename"], out)
                     st.rerun()
                 if b2.button("Delete document", key=f"del_{d['id']}"):
                     db.delete_document(d["id"], pid, u)
@@ -657,18 +690,16 @@ def page_medications() -> None:
                         except Exception as e:
                             _denied(e)
                             continue
-                    if out.get("error"):
-                        st.error(f"{name}: stored, but reading it failed: {out['error']}")
-                    elif provider is None:
-                        st.warning(f"{name}: stored, but no model key is configured so nothing was read.")
-                    else:
-                        st.success(f"{name}: {out['items']} items found. Check them below.")
+                    if provider is None and not out.get("error"):
+                        out["error"] = "no model key is configured, so nothing was read"
+                    _note_upload(name, out)
                 st.rerun()
+    _show_upload_summaries()
     pending_meds = {fid: [i for i in items if i["item_type"] in ("medication", "diagnosis")]
                     for fid, items in documents.pending_review(pid, u).items()}
     pending_meds = {fid: items for fid, items in pending_meds.items() if items}
     if pending_meds:
-        st.subheader("Check these before they join the list")
+        st.subheader("Needs a look before it joins the list")
         _review_items(pid, pending_meds)
     found = meds.find_duplicates(pid, u)
     for g in found.get("duplicates", []):
@@ -749,6 +780,7 @@ def page_values() -> None:
         st.dataframe(table, hide_index=True, width="stretch")
     else:
         st.caption("No values yet. Upload a lab report or add one below.")
+    _show_upload_summaries()
     pending_vitals = {fid: [i for i in items if i["item_type"] == "vital"] for fid, items in documents.pending_review(pid, u).items()}
     pending_vitals = {fid: items for fid, items in pending_vitals.items() if items}
     if pending_vitals:
@@ -791,12 +823,12 @@ def page_values() -> None:
                     with st.spinner("Reading..."):
                         try:
                             out = documents.stage_text_readings(pid, u, text.strip(), provider)
-                            st.success(f"{out['items']} readings found. Check them above and confirm.")
+                            _note_upload("Typed readings", out)
                             st.rerun()
                         except Exception as e:
                             _denied(e)
         with tab_photo:
-            st.caption("A photo of a BP diary, glucose meter screen or logbook, or a weight chart. Readings are extracted for you to confirm.")
+            st.caption("A photo of a BP diary, glucose meter screen or logbook, or a weight chart. Clear readings are added on their own; unsure ones wait for a look.")
             shot = st.file_uploader("Photo or PDF of the log", type=["pdf", "jpg", "jpeg", "png", "webp"], key="values_photo")
             cam = st.camera_input("Or take the photo now", key="values_camera")
             f = shot or cam
@@ -810,7 +842,7 @@ def page_values() -> None:
                 if out.get("error"):
                     st.error(out["error"])
                 else:
-                    st.success(f"{out['items']} readings found. Check them above and confirm.")
+                    _note_upload(name, out)
                     st.rerun()
         with tab_manual, st.form("add_value", clear_on_submit=True):
             st.markdown("**Add a reading by hand**")
@@ -939,7 +971,7 @@ def page_conversations() -> None:
     conv_files = {c["file_id"] for c in rows if c.get("file_id")}
     pending = {fid: items for fid, items in pending.items() if fid in conv_files}
     if pending:
-        st.subheader("Said in a conversation, waiting for your confirmation")
+        st.subheader("Said in a conversation, needs a look")
         st.caption("Medications and follow-ups only enter the record after you confirm them here.")
         _review_items(pid, pending)
     st.subheader("Conversations on record")
@@ -965,7 +997,14 @@ def _ingest_conversation(pid: int, u: dict, f, provider, visit_day, lang: str) -
     if out.get("error"):
         st.error(f"Stored, but not processed: {out['error']}")
     else:
-        st.success(f"Done. {out['items']} medication or follow-up items are waiting for your confirmation below.")
+        added = out.get("added") or []
+        to_check = out.get("to_check") or []
+        msg = "Done."
+        if added:
+            msg += " Added to the record: " + "; ".join(added) + "."
+        if to_check:
+            msg += " Needs a look below: " + "; ".join(to_check) + "."
+        st.success(msg)
     st.rerun()
 
 

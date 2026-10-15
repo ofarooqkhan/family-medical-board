@@ -660,6 +660,25 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0i Round 9: automatic adding, straightening, request size (2026-10-15)
+Owner's first live upload (a multi-page scanned PDF) failed with HTTP 413
+"Body buffer overflow" from the Replit OpenAI gateway: twelve full
+resolution PNG pages in one request. Fix: pages are JPEG at most 1800 px
+on the long side, extraction sends at most four pages per call under a
+5.5 MB encoded budget (`extraction._batches`), per-batch results are
+merged (`_merge_documents`), and one ModelCall carries the totals. A
+twelve page scan now goes in three calls under 1 MB each.
+Owner's rule, implemented: extracted items the model is sure about
+(confidence at least 0.6 and no low-confidence fields) are added to the
+record on their own; unsure ones wait on the page as "Needs a look"; an
+upload ends with a "What was read" summary (added, needs a look). Same
+for typed readings and conversation items. `AUTO_ADD_ITEMS=0` restores
+item-by-item confirmation (the test fixtures set it so the older tests
+keep their meaning).
+Photos, and scanned PDF pages without embedded text, are straightened
+before reading (`extraction.straighten`: projection-profile skew
+estimate, rotation, autocontrast; Pillow and numpy only).
+
 ### 8.0h Round 7 live (2026-10-15)
 `ddc4a49` (delete a wrong conversation from the top of its record, with
 confirmation) and `ad6eac3` (summaries use the patient's first name)
