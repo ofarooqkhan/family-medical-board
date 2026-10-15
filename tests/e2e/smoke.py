@@ -146,8 +146,8 @@ with sync_playwright() as pw:
     page.get_by_role("button", name="Create invite").click()
     wait_idle(page, 2000)
     shot(page, "12-settings-invite")
-    html = page.content()
-    assert "Invite created" in html and "?invite=" in html and "sister@example.com" in html
+    text = page.inner_text("body")
+    assert "Invite created" in text and "invite=" in text and "sister@example.com" in text
     page.get_by_role("tab", name="Audit log").click()
     wait_idle(page)
     assert "board.run" in page.content() and "medication.add" in page.content()
