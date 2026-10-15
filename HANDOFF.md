@@ -660,6 +660,14 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0l Round 8 awaiting the owner's Republish (2026-10-15)
+`d02f28c` is synced in the Repl, development database at 0008, app
+running. `publish_app` is refused again because the schema changed
+(migration 0008 adds four columns to doctor_memory). The owner presses
+Republish on replit.com and approves the review; the guarded migration
+then completes on production at first load. Never choose the
+copy-development-to-production option.
+
 ### 8.0k Round 8: memory that improves with use (2026-10-15)
 Built under the recommended defaults the owner had not yet answered
 (lessons family-wide, automatic consolidation with restore, raw notes
