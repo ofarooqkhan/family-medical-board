@@ -48,7 +48,26 @@ DEFAULT_MODELS = {
     "coordinator": os.environ.get("MODEL_COORDINATOR", "gpt-4o"),
     "router": os.environ.get("MODEL_ROUTER", "gpt-4o-mini"),
     "translate": os.environ.get("MODEL_TRANSLATE", "gpt-4o-mini"),
+    # Speech to text. The diarizing model labels speakers (A, B, ...); the plain
+    # model is the fallback when the endpoint or account does not offer it.
+    "transcription": os.environ.get("MODEL_TRANSCRIPTION", "gpt-4o-transcribe-diarize"),
+    "transcription_fallback": os.environ.get("MODEL_TRANSCRIPTION_FALLBACK", "gpt-4o-transcribe"),
+    "summary": os.environ.get("MODEL_SUMMARY", "gpt-4o"),
 }
+
+# USD per minute of audio. Unknown models get cost None, never a guess.
+PRICES_PER_MINUTE: dict[str, float] = {
+    "whisper-1": 0.006,
+    "gpt-4o-transcribe": 0.006,
+    "gpt-4o-mini-transcribe": 0.003,
+}
+
+
+def estimate_audio_cost(model: str, seconds: float | None) -> float | None:
+    price = PRICES_PER_MINUTE.get(model)
+    if price is None or not seconds:
+        return None
+    return round(seconds / 60 * price, 6)
 
 
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
@@ -92,8 +111,24 @@ class Part:
         return Part(image_png=data)
 
 
+@dataclass
+class Transcript:
+    """Speech to text result. segments carry speaker labels when the model
+    diarized (A, B, ...); otherwise there is one segment with speaker None."""
+    text: str
+    segments: list[dict[str, Any]] = field(default_factory=list)
+    duration_seconds: float | None = None
+    model: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"text": self.text, "segments": self.segments, "duration_seconds": self.duration_seconds, "model": self.model}
+
+
 class Provider(Protocol):
     name: str
+
+    def transcribe(self, *, data: bytes, filename: str, purpose: str, language: str | None = None,
+                   models: list[str] | None = None) -> tuple["Transcript", ModelCall]: ...
 
     def structured(self, *, model: str, system: str, parts: list[Part], schema: type[T], purpose: str,
                    max_tokens: int = 4000, temperature: float = 0.0) -> tuple[T, ModelCall]: ...
@@ -191,6 +226,48 @@ class OpenAIProvider:
             call.cost_usd = estimate_cost(model, call.input_tokens, call.output_tokens)
         return completion.choices[0].message.content or "", call
 
+    def transcribe(self, *, data, filename, purpose, language=None, models=None):
+        """Try each model in turn: a diarizing model first, then plain transcription.
+        Different SDK versions and gateways accept different arguments, so an
+        argument the SDK rejects just moves on to the next attempt."""
+        models = models or [DEFAULT_MODELS["transcription"], DEFAULT_MODELS["transcription_fallback"], "whisper-1"]
+        errors: list[str] = []
+        t0 = time.time()
+        for model in models:
+            call = ModelCall(self.name, model, purpose)
+            kwargs: dict[str, Any] = {"model": model, "file": (filename, data)}
+            if language:
+                kwargs["language"] = language
+            if "diarize" in model:
+                kwargs["response_format"] = "diarized_json"
+                kwargs["chunking_strategy"] = "auto"
+            else:
+                kwargs["response_format"] = "json"
+            try:
+                result = self._client.audio.transcriptions.create(**kwargs)
+            except Exception as e:
+                errors.append(f"{model}: {type(e).__name__}: {e}")
+                continue
+            call.duration_ms = int((time.time() - t0) * 1000)
+            text = getattr(result, "text", None) or (result if isinstance(result, str) else "")
+            segments = []
+            for seg in getattr(result, "segments", None) or []:
+                segments.append({"speaker": getattr(seg, "speaker", None), "start": getattr(seg, "start", None),
+                                 "end": getattr(seg, "end", None), "text": getattr(seg, "text", "")})
+            duration = getattr(result, "duration", None)
+            usage = getattr(result, "usage", None)
+            if duration is None and usage is not None:
+                duration = getattr(usage, "seconds", None)
+            if usage is not None and getattr(usage, "input_tokens", None) is not None:
+                call.input_tokens = usage.input_tokens or 0
+                call.output_tokens = getattr(usage, "output_tokens", 0) or 0
+            call.cost_usd = estimate_audio_cost(model, duration)
+            if not segments:
+                segments = [{"speaker": None, "start": 0.0, "end": duration, "text": text}]
+            return Transcript(text=text or "", segments=segments, duration_seconds=duration, model=model), call
+        msg = "transcription failed: " + " | ".join(errors)
+        raise ProviderError(msg)
+
 
 @dataclass
 class FakeProvider:
@@ -200,6 +277,7 @@ class FakeProvider:
     name: str = "fake"
     responses: dict[Any, Any] = field(default_factory=dict)
     texts: dict[str, Any] = field(default_factory=dict)
+    transcripts: dict[str, Any] = field(default_factory=dict)
     calls: list[dict[str, Any]] = field(default_factory=list)
     input_tokens: int = 100
     output_tokens: int = 50
@@ -227,6 +305,20 @@ class FakeProvider:
         if callable(canned):
             canned = canned(parts)
         return str(canned), call
+
+    def transcribe(self, *, data, filename, purpose, language=None, models=None):
+        self.calls.append({"model": "fake-transcribe", "purpose": purpose, "filename": filename, "bytes": len(data)})
+        canned = self.transcripts.get(purpose, self.transcripts.get("*"))
+        if canned is None:
+            raise ProviderError(f"FakeProvider has no transcript for {purpose}")
+        if callable(canned):
+            canned = canned(data, filename)
+        if isinstance(canned, str):
+            canned = Transcript(text=canned, segments=[{"speaker": None, "start": 0.0, "end": None, "text": canned}],
+                                duration_seconds=None, model="fake-transcribe")
+        elif isinstance(canned, dict):
+            canned = Transcript(**canned)
+        return canned, ModelCall(self.name, "fake-transcribe", purpose, 0, 0, None, 1)
 
 
 _provider_factories: dict[str, Callable[[], Provider]] = {

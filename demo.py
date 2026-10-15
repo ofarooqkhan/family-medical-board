@@ -56,6 +56,25 @@ def _schema_response(schema_name: str, parts: list[Part]) -> dict[str, Any]:
                                       "sources": [{"file_id": None, "page": None, "label": "demo"}], "confidence": 0.1}],
                 "questions_by_doctor": [{"doctor": "Treating doctor", "questions": ["(demo) Is the medication list complete?"]}],
                 "missing_records": [], "disagreements": [], "declined_advice_request": False, "decline_note": None}
+    if schema_name == "ConsultationSummary":
+        return {"title": "(demo) Diabetes review with Dr. Demo", "language": "en", "happened_on": None,
+                "doctor_name": "Dr. Demo", "doctor_specialty": "Endocrinology", "doctor_confidence": 0.6,
+                "speakers": [{"label": "A", "role": "doctor", "name": "Dr. Demo", "confidence": 0.6},
+                             {"label": "B", "role": "family", "name": None, "confidence": 0.5}],
+                "turns": [{"speaker": "A", "text": "(demo) The sugar readings are higher than last time."},
+                          {"speaker": "B", "text": "(demo) Should we change anything?"},
+                          {"speaker": "A", "text": "(demo) Increase metformin to 1000 mg twice daily and repeat HbA1c in three months."}],
+                "context": "(demo) Routine diabetes follow-up.", "summary": "(demo) The doctor reviewed the sugar log and raised the metformin dose. A repeat HbA1c was requested in three months.",
+                "findings_discussed": ["(demo) Fasting sugar higher than at the last visit"],
+                "decisions": ["(demo) Metformin increased to 1000 mg twice daily"],
+                "actions": [{"text": "(demo) Repeat HbA1c in three months", "who": "family", "when": "in three months", "kind": "test", "confidence": 0.8},
+                            {"text": "(demo) Keep the sugar log twice a day", "who": "family", "when": None, "kind": "monitoring", "confidence": 0.7}],
+                "medication_changes": [{"name": "Metformin (demo)", "generic_name": "metformin", "dose": "1000 mg", "route": "oral",
+                                        "frequency": "twice daily", "change": "change", "reason": "higher sugar readings",
+                                        "instructions": "after meals", "confidence": 0.8, "low_confidence_fields": []}],
+                "follow_ups": [{"title": "(demo) Diabetes follow-up", "when_text": "in three months", "date": None,
+                                "doctor_name": "Dr. Demo", "specialty": "Endocrinology", "confidence": 0.6}],
+                "questions_left_open": ["(demo) Whether the evening dose should move earlier"], "overall_confidence": 0.5}
     raise KeyError(schema_name)
 
 
@@ -68,6 +87,14 @@ class DemoProvider(FakeProvider):
     def structured(self, *, model, system, parts, schema, purpose, max_tokens=4000, temperature=0.0):
         call = self._record(model, purpose, system, parts, schema)
         return schema.model_validate(_schema_response(schema.__name__, parts)), call
+
+    def transcribe(self, *, data, filename, purpose, language=None, models=None):
+        from providers import ModelCall, Transcript
+        self.calls.append({"model": "demo-transcribe", "purpose": purpose, "filename": filename, "bytes": len(data)})
+        text = ("(demo) The sugar readings are higher than last time. Should we change anything? "
+                "Increase metformin to 1000 mg twice daily and repeat HbA1c in three months.")
+        return Transcript(text=text, segments=[{"speaker": None, "start": 0.0, "end": None, "text": text}],
+                          duration_seconds=None, model="demo-transcribe"), ModelCall("demo", "demo-transcribe", purpose, 0, 0, None, 1)
 
     def text(self, *, model, system, parts, purpose, max_tokens=2000, temperature=0.0):
         call = self._record(model, purpose, system, parts, None)

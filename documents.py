@@ -20,6 +20,7 @@ KIND_LABELS = {
     "imaging_report": "Imaging report",
     "discharge_summary": "Discharge summary or letter",
     "vitals_log": "Readings log (BP, sugar, weight)",
+    "consultation_audio": "Doctor conversation (audio)",
     "other": "Other document",
 }
 
@@ -133,6 +134,17 @@ def confirm_item(item_id: int, patient_id: int, user: dict, payload: dict[str, A
                                   extracted_item_id=item_id)
             for r in rows
         ]
+    elif kind == "appointment":
+        import appointments as appts
+
+        starts = appts.to_naive_utc(payload.get("starts_at"))
+        if starts is None:
+            raise ValueError("a date is required to confirm a follow-up")
+        if starts.hour == 0 and starts.minute == 0:
+            starts = starts.replace(hour=10)
+        out["appointment_id"] = appts.add_appointment(
+            patient_id, user, payload.get("title") or "Follow-up", starts, kind=payload.get("kind") or "visit",
+            doctor_name=payload.get("doctor_name"), specialty=payload.get("specialty"), notes=payload.get("notes"))
     elif kind in ("imaging_finding", "diagnosis", "fact"):
         text = payload.get("text") or f"{payload.get('label', '')}: {payload.get('value', '')}"
         doctor = {"imaging_finding": "radiologist", "diagnosis": "general_duty", "fact": "general_duty"}[kind]

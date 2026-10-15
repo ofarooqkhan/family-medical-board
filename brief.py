@@ -99,6 +99,8 @@ def build_brief(patient_id: int, user: dict, appointment_id: int | None = None, 
                 missing.append(m)
 
     memories = db.get_doctor_memories(patient_id, user, limit=8)
+    import consultations
+    conversations = consultations.recent_for_brief(patient_id, user, since)
     return {
         "patient": {k: patient.get(k) for k in ("id", "name", "age", "date_of_birth", "sex", "allergies", "primary_doctor", "medical_history")},
         "appointment": appointment,
@@ -112,6 +114,7 @@ def build_brief(patient_id: int, user: dict, appointment_id: int | None = None, 
         "questions": questions[:25],
         "missing_records": missing[:10],
         "recent_notes": [{"doctor": m["doctor_type"], "text": m["content"][:300], "date": _d(m["created_at"])[:10]} for m in memories],
+        "conversations": conversations,
     }
 
 
@@ -120,11 +123,13 @@ _LABELS = {
            "meds": "Current medications", "changes": "Medication changes in the last {d} days", "values": "Latest values",
            "docs": "Documents added in the last {d} days", "questions": "Questions for this visit", "missing": "Records we are missing",
            "pending": "{n} extracted items still await family review", "notes": "Notes from earlier reviews",
+           "conversations": "Doctor conversations in the last {d} days", "actions": "Asked of us",
            "none": "none", "disclaimer": "This brief summarizes the family's records. It is not medical advice."},
     "ur": {"title": "ملاقات سے پہلے کا خلاصہ", "patient": "مریض", "appointment": "ملاقات", "generated": "تیار کیا گیا",
            "meds": "موجودہ ادویات", "changes": "پچھلے {d} دنوں میں ادویات کی تبدیلیاں", "values": "تازہ ترین نتائج",
            "docs": "پچھلے {d} دنوں میں شامل دستاویزات", "questions": "اس ملاقات کے لیے سوالات", "missing": "جو ریکارڈ ہمارے پاس نہیں",
            "pending": "{n} نکالے گئے آئٹمز ابھی خاندان کے جائزے کے منتظر ہیں", "notes": "پچھلے جائزوں کے نوٹس",
+           "conversations": "پچھلے {d} دنوں میں ڈاکٹر سے گفتگو", "actions": "ہم سے کہا گیا",
            "none": "کوئی نہیں", "disclaimer": "یہ خلاصہ خاندان کے ریکارڈ کا ہے۔ یہ طبی مشورہ نہیں ہے۔"},
 }
 
@@ -188,6 +193,12 @@ def brief_markdown(brief: dict[str, Any], language: str = "en") -> str:
         out.append(f"- {L['none']}")
     if brief["pending_review"]:
         out.append(f"\n_{L['pending'].format(n=brief['pending_review'])}_")
+    if brief.get("conversations"):
+        out.append(f"\n## {L['conversations'].format(d=d)}")
+        for c in brief["conversations"]:
+            out.append(f"- **{c['date']}** {c['title']}" + (f" ({c['doctor']})" if c.get("doctor") else "") + f": {c['summary']}")
+            for a in c.get("actions") or []:
+                out.append(f"    - {L['actions']}: {a}")
     if brief["recent_notes"]:
         out.append(f"\n## {L['notes']}")
         out += [f"- [{n['doctor']}] {n['text']}" for n in brief["recent_notes"]]
