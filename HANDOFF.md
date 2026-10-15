@@ -660,6 +660,25 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0d Live state at the end of 2026-10-15
+- GitHub main `735b84b`, CI green. Repl workspace runs the same files
+  (Replit Agent added a commit of its own on top; python files identical).
+- Replit keeps two databases. Development (workspace preview) is at
+  revision 0007 with the 4 legacy patients and no password accounts.
+  Production (the published app, the owner's accounts) is at 0003. The
+  app migrates production to 0007 the first time the new build starts
+  there.
+- The published site still runs the old build. `publish_app` from the
+  connector is refused while the schema differs; the owner must press
+  Publish in the Replit UI once and approve the schema review.
+- Workspace preview while the Repl is awake:
+  https://0910c133-b692-4c80-b4d8-39d37884f87b-00-1r5nsab7pa7xm.sisko.replit.dev
+  (development database, separate from production).
+- Transcription through the Replit OpenAI integration: `/audio/speech`
+  is not offered, `diarized_json` is rejected, `gpt-4o-transcribe` works
+  (checked with `tests/e2e/transcribe_check.py`, exit 0). Speaker roles
+  come from the summary model.
+
 ### 8.0c Repl git remote (2026-10-15)
 The Repl's `origin` pointed at the retired `medical-board-history`
 repository, so fetches failed with an auth error and Replit Agent had
