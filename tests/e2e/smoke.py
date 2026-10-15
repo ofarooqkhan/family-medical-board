@@ -145,7 +145,7 @@ with sync_playwright() as pw:
     wait_idle(page, 4000)
     shot(page, "07c-conversation")
     text = page.inner_text("body")
-    assert "Diabetes review with Dr. Demo" in text and "Added to the record: Metformin (demo)" in text, text[:800]
+    assert "Diabetes review with Dr. Demo" in text and "What was read" in text and "Metformin (demo)" in text, text[:800]
     assert page.get_by_role("button", name="Confirm").count() == 0
     page.get_by_text("Diabetes review with Dr. Demo").first.click()
     wait_idle(page, 800)

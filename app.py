@@ -965,6 +965,7 @@ def page_conversations() -> None:
             lang2 = st.selectbox("Spoken language", ["auto", "en", "ur"], format_func=lambda x: {"auto": "Detect", "en": "English", "ur": "Urdu"}[x], key="conv_up_lang")
             if up is not None and st.button("Transcribe and summarize", type="primary", key="conv_up_go"):
                 _ingest_conversation(pid, u, up, provider, visit_day2, lang2)
+    _show_upload_summaries()
     rows = consultations.list_consultations(pid, u)
     pending = {fid: items for fid, items in documents.pending_review(pid, u).items()
                if any(i["item_type"] in ("medication", "appointment") for i in items)}
@@ -994,17 +995,7 @@ def _ingest_conversation(pid: int, u: dict, f, provider, visit_day, lang: str) -
         except Exception as e:
             _denied(e)
             return
-    if out.get("error"):
-        st.error(f"Stored, but not processed: {out['error']}")
-    else:
-        added = out.get("added") or []
-        to_check = out.get("to_check") or []
-        msg = "Done."
-        if added:
-            msg += " Added to the record: " + "; ".join(added) + "."
-        if to_check:
-            msg += " Needs a look below: " + "; ".join(to_check) + "."
-        st.success(msg)
+    _note_upload(name, out)
     st.rerun()
 
 
