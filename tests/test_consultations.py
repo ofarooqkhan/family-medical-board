@@ -56,6 +56,8 @@ def test_summarize_passes_speaker_labels_when_diarized():
     assert summary.doctor_name == "Dr. Lee"
     sent = p.calls[-1]["parts"][0].text
     assert "[A] Hello" in sent and "[B] Hi" in sent and "Parent One" in sent
+    assert "call them Parent, never 'the patient'" in sent
+    assert consultations.first_name("Abdul Rahman Khan") == "Abdul" and consultations.first_name(None) == ""
     assert "never add medical advice" in p.calls[-1]["system"].lower()
 
 

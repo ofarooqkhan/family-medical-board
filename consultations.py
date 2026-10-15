@@ -105,15 +105,22 @@ SUMMARY_SYSTEM = (
     "continue), any follow-up visits or tests with timing as said, and questions that were raised but not answered. "
     "Quote doses and frequencies exactly as spoken; put a field in low_confidence_fields when the audio was unclear. "
     "Never add medical advice, interpretation, or recommendations that were not spoken in the conversation. "
-    "Write in the language of the conversation; if it mixes Urdu and English, write the summary in English."
+    "Write in the language of the conversation; if it mixes Urdu and English, write the summary in English. "
+    "When the patient's name is given, use their first name instead of 'the patient'."
 )
+
+
+def first_name(name: str | None) -> str:
+    return (name or "").strip().split(" ")[0] if name else ""
 
 
 def summarize_transcript(provider: Provider, model: str, transcript: Transcript,
                          patient_name: str | None = None) -> tuple[ConsultationSummary, Any]:
     lines = []
     if patient_name:
-        lines.append(f"Patient on record: {patient_name}")
+        first = first_name(patient_name)
+        lines.append(f"Patient on record: {patient_name}. In the summary, context, decisions, actions and turns, call them "
+                     f"{first}, never 'the patient'. If the conversation is clearly about someone else, say so in the summary.")
     if transcript.segments and any(s.get("speaker") for s in transcript.segments):
         lines.append("Transcript with speaker labels:")
         for s in transcript.segments:
