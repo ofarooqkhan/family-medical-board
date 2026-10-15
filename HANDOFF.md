@@ -660,6 +660,11 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0m Round 8 live (2026-10-15)
+The owner republished; deployment success, health ok, production
+database at 0008 with the four new doctor_memory columns. The live site
+now carries every round through `d02f28c`.
+
 ### 8.0l Round 8 awaiting the owner's Republish (2026-10-15)
 `d02f28c` is synced in the Repl, development database at 0008, app
 running. `publish_app` is refused again because the schema changed
