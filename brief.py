@@ -98,7 +98,9 @@ def build_brief(patient_id: int, user: dict, appointment_id: int | None = None, 
             if m not in missing:
                 missing.append(m)
 
-    memories = db.get_doctor_memories(patient_id, user, limit=8)
+    memories = [m for m in db.get_doctor_memories(patient_id, user, limit=40) if m["doctor_type"] != db.SHARED_AGENT][:8]
+    import memory as memory_mod
+    profile_facts = memory_mod.profile(patient_id, user)
     import consultations
     conversations = consultations.recent_for_brief(patient_id, user, since)
     return {
@@ -115,6 +117,7 @@ def build_brief(patient_id: int, user: dict, appointment_id: int | None = None, 
         "missing_records": missing[:10],
         "recent_notes": [{"doctor": m["doctor_type"], "text": m["content"][:300], "date": _d(m["created_at"])[:10]} for m in memories],
         "conversations": conversations,
+        "profile": [{"text": f["content"], "category": f.get("category") or "other"} for f in profile_facts],
     }
 
 
@@ -124,12 +127,14 @@ _LABELS = {
            "docs": "Documents added in the last {d} days", "questions": "Questions for this visit", "missing": "Records we are missing",
            "pending": "{n} extracted items still await family review", "notes": "Notes from earlier reviews",
            "conversations": "Doctor conversations in the last {d} days", "actions": "Asked of us",
+           "profile": "Established facts and standing instructions",
            "none": "none", "disclaimer": "This brief summarizes the family's records. It is not medical advice."},
     "ur": {"title": "ملاقات سے پہلے کا خلاصہ", "patient": "مریض", "appointment": "ملاقات", "generated": "تیار کیا گیا",
            "meds": "موجودہ ادویات", "changes": "پچھلے {d} دنوں میں ادویات کی تبدیلیاں", "values": "تازہ ترین نتائج",
            "docs": "پچھلے {d} دنوں میں شامل دستاویزات", "questions": "اس ملاقات کے لیے سوالات", "missing": "جو ریکارڈ ہمارے پاس نہیں",
            "pending": "{n} نکالے گئے آئٹمز ابھی خاندان کے جائزے کے منتظر ہیں", "notes": "پچھلے جائزوں کے نوٹس",
            "conversations": "پچھلے {d} دنوں میں ڈاکٹر سے گفتگو", "actions": "ہم سے کہا گیا",
+           "profile": "طے شدہ حقائق اور ڈاکٹروں کی مستقل ہدایات",
            "none": "کوئی نہیں", "disclaimer": "یہ خلاصہ خاندان کے ریکارڈ کا ہے۔ یہ طبی مشورہ نہیں ہے۔"},
 }
 
@@ -193,6 +198,9 @@ def brief_markdown(brief: dict[str, Any], language: str = "en") -> str:
         out.append(f"- {L['none']}")
     if brief["pending_review"]:
         out.append(f"\n_{L['pending'].format(n=brief['pending_review'])}_")
+    if brief.get("profile"):
+        out.append(f"\n## {L['profile']}")
+        out += [f"- {f['text']}" for f in brief["profile"][:20]]
     if brief.get("conversations"):
         out.append(f"\n## {L['conversations'].format(d=d)}")
         for c in brief["conversations"]:

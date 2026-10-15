@@ -75,6 +75,9 @@ def _schema_response(schema_name: str, parts: list[Part]) -> dict[str, Any]:
                 "follow_ups": [{"title": "(demo) Diabetes follow-up", "when_text": "in three months", "date": None,
                                 "doctor_name": "Dr. Demo", "specialty": "Endocrinology", "confidence": 0.6}],
                 "questions_left_open": ["(demo) Whether the evening dose should move earlier"], "overall_confidence": 0.5}
+    if schema_name == "ProfileUpdate":
+        return {"new_facts": [{"text": "(demo) Type 2 diabetes, followed by Dr. Demo", "category": "diagnosis", "importance": 7, "replaces_ids": []}],
+                "contradictions": [], "unchanged": False}
     raise KeyError(schema_name)
 
 

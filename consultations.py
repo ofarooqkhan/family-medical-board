@@ -226,10 +226,9 @@ def process(cid: int, patient_id: int, user: dict, provider: Provider, language:
                      DEFAULT_MODELS["summary"], cost, transcript.duration_seconds, cid, patient_id))
         audit(cur, user, patient_id, "consultation.summarize", "consultation", cid,
               {"doctor": summary.doctor_name, "actions": len(summary.actions), "medication_changes": len(summary.medication_changes)})
-    # The general duty agent remembers the visit so later board runs see it.
-    memo = f"Doctor conversation on {happened}" + (f" with {summary.doctor_name}" if summary.doctor_name else "") + f": {summary.summary}"
-    db.save_doctor_memory(patient_id, user, "general_duty", "consultation", memo[:900], importance=5,
-                          source_file_id=row["file_id"], source_consultation_id=cid)
+    # Standing instructions and the doctor go into the shared profile; the visit becomes a general duty note.
+    import memory
+    memory.record_consultation(patient_id, user, summary.model_dump(), cid, row["file_id"], happened)
     db.set_document_extraction(row["file_id"], patient_id, user, extraction={"consultation_id": cid, "calls": out["calls"]},
                                model=transcript.model, document_kind="consultation_audio", document_date=happened,
                                extracted_text=transcript.text)

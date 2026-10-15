@@ -198,11 +198,13 @@ def build_context(patient_id: int, user: dict, max_chars: int = 24000) -> str:
         lines.append(entry)
         budget -= len(entry) + 1
 
-    mem = db.get_doctor_memories(patient_id, user, limit=15)
-    if mem:
-        lines.append("\nNOTES FROM EARLIER REVIEWS:")
-        for m in mem:
-            lines.append(f"- [{m['doctor_type']}] {m['content'][:300]}")
+    try:
+        import memory
+        block = memory.context_block(patient_id, user)
+        if block:
+            lines.append(block)
+    except Exception:
+        pass
 
     try:
         import appointments
@@ -279,8 +281,10 @@ def route(provider: Provider, query: str, context: str, agents: list[dict], mode
 # ---------------------------------------------------------------------------
 
 def run_specialist(provider: Provider, agent: dict, query: str, context: str, language: str,
-                   advice_flagged: bool, model: str | None = None) -> tuple[SpecialistOutput, ModelCall]:
+                   advice_flagged: bool, model: str | None = None, notes: str = "") -> tuple[SpecialistOutput, ModelCall]:
     model = model or agent.get("model") or DEFAULT_MODELS["specialist"]
+    if notes:
+        context = context + "\n" + notes
     system = agent.get("system_prompt") or agent.get("backstory") or ""
     system += (f"\nSet agent_type to '{agent['agent_type']}'. Write summary and observation text in "
                f"{'Urdu' if language == 'ur' else 'English'}. Cite sources using the doc ids and page numbers from the record. "
@@ -367,7 +371,12 @@ def run_board(patient_id: int, user: dict, query: str, provider: Provider, langu
         if agent_type == "pharmacist" and flags:
             ctx += "\n\nRECONCILIATION FLAGS (computed from the medication list):\n" + json.dumps(flags, ensure_ascii=False)
         try:
-            out, c = run_specialist(provider, agent, query, ctx, language, advice_flagged)
+            import memory
+            notes = memory.notes_block(patient_id, user, agent_type, query)
+        except Exception:
+            notes = ""
+        try:
+            out, c = run_specialist(provider, agent, query, ctx, language, advice_flagged, notes=notes)
             outputs.append(out)
             calls.append(c)
         except ProviderError as e:
@@ -425,13 +434,21 @@ def run_board(patient_id: int, user: dict, query: str, provider: Provider, langu
     if coordinator.what_changed or coordinator.questions_by_doctor:
         memo = coordinator.headline + " " + " ".join(coordinator.what_changed[:3])
         db.save_doctor_memory(patient_id, user, "coordinator", "board_summary", memo[:900], importance=4, source_run_id=run_id)
+    # Merge what was found into the shared profile (one small call; never fatal).
+    consolidation = None
+    if outputs and not coordinator.declined_advice_request:
+        try:
+            import memory
+            consolidation = memory.consolidate(provider, patient_id, user, [o.model_dump() for o in outputs], run_id=run_id)
+        except Exception as e:  # a memory failure must not lose the run
+            consolidation = {"error": str(e)}
 
     return {
         "id": run_id, "patient_id": patient_id, "query": query, "language": language, "routed_agents": chosen,
         "routing_reason": reason, "advice_flagged": advice_flagged, "specialist_outputs": [o.model_dump() for o in outputs],
         "coordinator_output": coordinator.model_dump(), "model_calls": [c.as_dict() for c in calls],
         "input_tokens": input_tokens, "output_tokens": output_tokens, "estimated_cost_usd": cost, "status": status,
-        "errors": errors, "duration_ms": duration_ms,
+        "errors": errors, "duration_ms": duration_ms, "consolidation": consolidation,
     }
 
 
