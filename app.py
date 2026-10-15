@@ -90,7 +90,7 @@ def render_login() -> None:
     st.title(APP_TITLE)
     st.caption(DISCLAIMER)
     first = auth.is_first_user()
-    tab_in, tab_up = st.tabs(["Sign in", "Create account"])
+    tab_in, tab_up, tab_forgot = st.tabs(["Sign in", "Create account", "Forgot password"])
     with tab_in:
         with st.form("login"):
             email = st.text_input("Email", key="login_email")
@@ -114,6 +114,22 @@ def render_login() -> None:
             if st.form_submit_button("Create account", type="primary", width="stretch"):
                 try:
                     st.session_state.user = auth.signup(email, password, name, code or None)
+                    st.rerun()
+                except auth.AuthError as e:
+                    st.error(str(e))
+    with tab_forgot:
+        if auth.reset_secret_configured():
+            st.info("Enter the family reset code (the admin keeps it) and choose a new password.")
+        else:
+            st.info("Ask the family admin to reset your password from Settings. Admins can enable self-service "
+                    "reset by adding a PASSWORD_RESET_SECRET secret to the app.")
+        with st.form("forgot"):
+            email = st.text_input("Email", key="forgot_email")
+            code = st.text_input("Family reset code", type="password", key="forgot_code")
+            password = st.text_input("New password (at least 10 characters)", type="password", key="forgot_password")
+            if st.form_submit_button("Set new password", width="stretch"):
+                try:
+                    st.session_state.user = auth.reset_password_with_secret(email, code, password)
                     st.rerun()
                 except auth.AuthError as e:
                     st.error(str(e))

@@ -10,6 +10,8 @@ replace this module behind the same two functions, login() and signup().
 """
 from __future__ import annotations
 
+import hmac
+import os
 import re
 import secrets
 import uuid
@@ -70,9 +72,13 @@ def signup(email: str, password: str, display_name: str, invite_code: str | None
     with db_cursor(commit=True) as cur:
         cur.execute("SELECT count(*) AS n FROM users WHERE password_hash IS NOT NULL")
         first = cur.fetchone()["n"] == 0
-        cur.execute("SELECT id FROM users WHERE lower(email) = %s", (email,))
-        if cur.fetchone():
-            raise AuthError("An account with that email already exists.")
+        cur.execute("SELECT id, password_hash FROM users WHERE lower(email) = %s", (email,))
+        existing = cur.fetchone()
+        if existing and existing["password_hash"]:
+            raise AuthError("An account with that email already exists. Use Sign in, or Forgot password.")
+        # A row with this email but no password is a leftover from the old
+        # development login. Signing up claims it, keeping its id and history.
+        legacy_id = existing["id"] if existing else None
         role = "admin"
         invite = None
         if not first:
@@ -86,15 +92,24 @@ def signup(email: str, password: str, display_name: str, invite_code: str | None
             if invite["expires_at"] and invite["expires_at"] < _utcnow():
                 raise AuthError("That invite code has expired.")
             role = invite["role"]
-        user_id = str(uuid.uuid4())
-        cur.execute(f"""
-            INSERT INTO users (id, email, first_name, display_name, password_hash, role, is_active, last_login_at)
-            VALUES (%s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP) RETURNING {PUBLIC_USER_COLUMNS}
-        """, (user_id, email, display_name.strip(), display_name.strip(), hash_password(password), role))
+        if legacy_id:
+            user_id = legacy_id
+            cur.execute(f"""
+                UPDATE users SET first_name = %s, display_name = %s, password_hash = %s, role = %s, is_active = TRUE,
+                       last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s RETURNING {PUBLIC_USER_COLUMNS}
+            """, (display_name.strip(), display_name.strip(), hash_password(password), role, user_id))
+        else:
+            user_id = str(uuid.uuid4())
+            cur.execute(f"""
+                INSERT INTO users (id, email, first_name, display_name, password_hash, role, is_active, last_login_at)
+                VALUES (%s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP) RETURNING {PUBLIC_USER_COLUMNS}
+            """, (user_id, email, display_name.strip(), display_name.strip(), hash_password(password), role))
         user = dict(cur.fetchone())
         if invite is not None:
             cur.execute("UPDATE invites SET used_by = %s, used_at = CURRENT_TIMESTAMP WHERE id = %s", (user_id, invite["id"]))
-        audit(cur, user, None, "user.signup", "user", None, {"role": role, "invite_id": invite["id"] if invite else None})
+        audit(cur, user, None, "user.signup", "user", None,
+              {"role": role, "invite_id": invite["id"] if invite else None, "claimed_legacy": bool(legacy_id)})
         return user
 
 
@@ -126,6 +141,34 @@ def change_password(user: dict, current_password: str, new_password: str) -> Non
         cur.execute("UPDATE users SET password_hash = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                     (hash_password(new_password), user["id"]))
         audit(cur, user, None, "user.password")
+
+
+def reset_secret_configured() -> bool:
+    return bool(os.environ.get("PASSWORD_RESET_SECRET"))
+
+
+def reset_password_with_secret(email: str, secret: str, new_password: str) -> dict:
+    """Forgot password without email delivery: the family keeps a reset code in
+    the PASSWORD_RESET_SECRET environment variable (Replit Secrets). Anyone
+    holding it can set a new password for an existing account."""
+    configured = os.environ.get("PASSWORD_RESET_SECRET") or ""
+    if not configured:
+        raise AuthError("Password reset is not set up. Ask the family admin to reset your password from Settings.")
+    if not hmac.compare_digest(configured.strip(), (secret or "").strip()):
+        raise AuthError("Reset code is incorrect.")
+    if len(new_password or "") < MIN_PASSWORD_LENGTH:
+        raise AuthError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+    email = (email or "").strip().lower()
+    with db_cursor(commit=True) as cur:
+        cur.execute("SELECT * FROM users WHERE lower(email) = %s", (email,))
+        row = cur.fetchone()
+        if row is None:
+            raise AuthError("No account with that email.")
+        cur.execute(f"""UPDATE users SET password_hash = %s, is_active = TRUE, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s RETURNING {PUBLIC_USER_COLUMNS}""", (hash_password(new_password), row["id"]))
+        user = dict(cur.fetchone())
+        audit(cur, user, None, "user.password_reset_self")
+        return user
 
 
 def reset_password(admin: dict, target_user_id: str) -> str:

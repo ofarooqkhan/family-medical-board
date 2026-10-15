@@ -180,6 +180,44 @@ def test_first_signup_is_admin_then_invites_are_required(migrated):
         auth.signup("c@example.com", "correct horse battery", "C", inv["code"])  # already used
 
 
+def test_signup_claims_a_legacy_row_without_password(migrated):
+    """The owner's email already exists from the old dev login, with no password."""
+    import auth
+    conn = _raw()
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("INSERT INTO users (id, email, first_name) VALUES ('legacy-1', 'Owner@Example.com', 'Owner')")
+    cur.execute("INSERT INTO patients (user_id, name) VALUES ('legacy-1', 'Parent One')")
+    cur.close()
+    conn.close()
+    assert auth.is_first_user()
+    with pytest.raises(auth.AuthError):
+        auth.login("owner@example.com", "correct horse battery")
+    user = auth.signup("owner@example.com", "correct horse battery", "Owner")
+    assert user["id"] == "legacy-1" and user["role"] == "admin"
+    assert auth.login("owner@example.com", "correct horse battery")["id"] == "legacy-1"
+    with pytest.raises(auth.AuthError):
+        auth.signup("owner@example.com", "another password here", "Owner again")
+    assert _query("SELECT count(*) FROM patients WHERE user_id = 'legacy-1'")[0][0] == 1
+
+
+def test_forgot_password_with_family_reset_code(accounts, monkeypatch):
+    import auth
+    monkeypatch.delenv("PASSWORD_RESET_SECRET", raising=False)
+    with pytest.raises(auth.AuthError):
+        auth.reset_password_with_secret("viewer@example.com", "anything", "a brand new password")
+    monkeypatch.setenv("PASSWORD_RESET_SECRET", "family-code-123")
+    with pytest.raises(auth.AuthError):
+        auth.reset_password_with_secret("viewer@example.com", "wrong", "a brand new password")
+    with pytest.raises(auth.AuthError):
+        auth.reset_password_with_secret("nobody@example.com", "family-code-123", "a brand new password")
+    user = auth.reset_password_with_secret("Viewer@Example.com", " family-code-123 ", "a brand new password")
+    assert user["id"] == accounts["viewer"]["id"]
+    auth.login("viewer@example.com", "a brand new password")
+    with pytest.raises(auth.AuthError):
+        auth.login("viewer@example.com", "correct horse battery")
+
+
 def test_login_rejects_wrong_password_and_disabled_accounts(accounts):
     import auth
     assert auth.login("Admin@Example.com", "correct horse battery")["id"] == accounts["admin"]["id"]
