@@ -191,3 +191,33 @@ def test_to_ics_from_database_rows(accounts, patient):
     assert out.count("BEGIN:VEVENT") == 2 and out.count("BEGIN:VALARM") == 2
     assert "SUMMARY:Visit\\, one" in out
     assert "DTEND:20261104T094500Z" in out
+
+
+# Add-to-calendar links and browser timezone helpers (no database)
+
+def test_google_and_outlook_links_carry_utc_times_and_details():
+    a = _rows()[0]
+    g = appts.google_calendar_url(a)
+    assert g.startswith("https://calendar.google.com/calendar/render?action=TEMPLATE")
+    assert "dates=20261103T143000Z%2F20261103T150000Z" in g
+    assert "Parent%20One" in g and "Dr.%20Lee" in g and "Clinic%20A" in g
+    o = appts.outlook_calendar_url(a)
+    assert o.startswith("https://outlook.live.com/calendar/0/action/compose?rru=addevent")
+    assert "startdt=2026-11-03T14%3A30%3A00%2B00%3A00" in o and "enddt=2026-11-03T15%3A00%3A00%2B00%3A00" in o
+    assert appts.outlook_calendar_url(a, work=True).startswith("https://outlook.office.com/")
+
+
+def test_share_text_uses_the_browser_timezone():
+    a = _rows()[0]
+    text = appts.share_text(a, "Asia/Karachi")
+    assert "Tue 03 Nov 2026, 19:30" in text and "Clinic A" in text
+    assert appts.whatsapp_share_url(text).startswith("https://wa.me/?text=Cardiology")
+    assert "Tue 03 Nov 2026, 14:30" in appts.share_text(a, "Nowhere/Invalid")
+
+
+def test_from_local_and_format_local_round_trip():
+    stored = appts.from_local(dt.date(2026, 11, 3), dt.time(19, 30), "Asia/Karachi")
+    assert stored == dt.datetime(2026, 11, 3, 14, 30)
+    assert appts.format_local(stored, "Asia/Karachi") == "Tue 03 Nov 2026, 19:30"
+    assert appts.format_local(stored, None) == "Tue 03 Nov 2026, 14:30"
+    assert appts.format_local(None, "Asia/Karachi") == ""

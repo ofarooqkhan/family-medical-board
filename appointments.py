@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from typing import Any, Iterable
+from urllib.parse import quote, urlencode
 
 from database import _assert_patient, audit, db_cursor, require_role
 
@@ -268,3 +269,96 @@ def to_ics(appointments: Iterable[dict], calendar_name: str = "Family Medical Bo
     for line in lines:
         physical.extend(_fold(line))
     return "\r\n".join(physical) + "\r\n"
+
+
+# ---------------------------------------------------------------------------
+# Add-to-calendar links (pure, no database)
+# ---------------------------------------------------------------------------
+
+def _event_fields(a: dict) -> tuple[_dt.datetime, _dt.datetime, str, str, str]:
+    start = to_naive_utc(a.get("starts_at"))
+    if start is None:
+        raise ValueError("appointment has no start time")
+    end = to_naive_utc(a.get("ends_at")) or (start + DEFAULT_DURATION)
+    title = (a.get("title") or "Appointment").strip()
+    if a.get("patient_name"):
+        title = f"{title} ({a['patient_name']})"
+    parts = []
+    if a.get("doctor_name"):
+        parts.append(f"Doctor: {a['doctor_name']}" + (f" ({a['specialty']})" if a.get("specialty") else ""))
+    elif a.get("specialty"):
+        parts.append(f"Specialty: {a['specialty']}")
+    if a.get("kind"):
+        parts.append(f"Kind: {a['kind']}")
+    if a.get("notes"):
+        parts.append(f"Notes: {a['notes']}")
+    return start, end, title, "\n".join(parts), (a.get("location") or "").strip()
+
+
+def google_calendar_url(a: dict) -> str:
+    """Pre-filled Google Calendar event (works signed in on web and in the iOS app)."""
+    start, end, title, details, location = _event_fields(a)
+    params = {
+        "action": "TEMPLATE",
+        "text": title,
+        "dates": f"{ics_timestamp(start)}/{ics_timestamp(end)}",
+        "details": details,
+        "location": location,
+    }
+    return "https://calendar.google.com/calendar/render?" + urlencode(params, quote_via=quote)
+
+
+def outlook_calendar_url(a: dict, work: bool = False) -> str:
+    """Pre-filled Outlook.com (or Microsoft 365 when work=True) event."""
+    start, end, title, details, location = _event_fields(a)
+    host = "outlook.office.com" if work else "outlook.live.com"
+    params = {
+        "rru": "addevent",
+        "subject": title,
+        "startdt": start.replace(tzinfo=_dt.timezone.utc).isoformat(),
+        "enddt": end.replace(tzinfo=_dt.timezone.utc).isoformat(),
+        "body": details,
+        "location": location,
+        "path": "/calendar/action/compose",
+    }
+    return f"https://{host}/calendar/0/action/compose?" + urlencode(params, quote_via=quote)
+
+
+def share_text(a: dict, tz_name: str | None = None) -> str:
+    """Plain text for WhatsApp or SMS, times shown in tz_name (UTC when unknown)."""
+    start, end, title, details, location = _event_fields(a)
+    when = format_local(start, tz_name)
+    lines = [f"{title}", f"When: {when}"]
+    if location:
+        lines.append(f"Where: {location}")
+    if details:
+        lines.append(details)
+    return "\n".join(lines)
+
+
+def whatsapp_share_url(text: str) -> str:
+    return "https://wa.me/?text=" + quote(text)
+
+
+def local_tz(tz_name: str | None):
+    """A tzinfo for an IANA name, UTC when missing or unknown."""
+    from zoneinfo import ZoneInfo
+    try:
+        return ZoneInfo(tz_name) if tz_name else _dt.timezone.utc
+    except Exception:
+        return _dt.timezone.utc
+
+
+def format_local(value: Any, tz_name: str | None, fmt: str = "%a %d %b %Y, %H:%M") -> str:
+    """Render a stored UTC timestamp in the browser's timezone."""
+    dt = to_naive_utc(value)
+    if dt is None:
+        return ""
+    local = dt.replace(tzinfo=_dt.timezone.utc).astimezone(local_tz(tz_name))
+    return local.strftime(fmt)
+
+
+def from_local(day: _dt.date, time_of_day: _dt.time, tz_name: str | None) -> _dt.datetime:
+    """Combine a wall-clock date and time in the browser's timezone into naive UTC for storage."""
+    aware = _dt.datetime.combine(day, time_of_day).replace(tzinfo=local_tz(tz_name))
+    return aware.astimezone(_dt.timezone.utc).replace(tzinfo=None)
