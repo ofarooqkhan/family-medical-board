@@ -236,7 +236,13 @@ def process(cid: int, patient_id: int, user: dict, provider: Provider, language:
     _discard_pending(patient_id, row["file_id"], user)
     items = items_from_summary(summary, happened)
     ids = db.add_extracted_items(patient_id, row["file_id"], user, items) if items else []
-    out.update({"items": len(ids), "item_ids": ids, "duration_ms": int((time.time() - t0) * 1000), "summary": summary.model_dump()})
+    out.update({"items": len(ids), "item_ids": ids, "duration_ms": int((time.time() - t0) * 1000), "summary": summary.model_dump(),
+                "added": [], "to_check": []})
+    import documents
+    if documents.auto_add_enabled() and ids:
+        out.update(documents.auto_confirm(patient_id, row["file_id"], user, ids))
+    elif ids:
+        out["to_check"] = [documents.item_label(i) for i in items]
     return out
 
 

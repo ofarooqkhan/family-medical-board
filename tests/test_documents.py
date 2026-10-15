@@ -60,7 +60,7 @@ def test_upload_without_provider_stores_pages_only(accounts):
     doc = db.get_document(out["file_id"], pid, accounts["viewer"])
     assert doc["status"] == "uploaded" and doc["page_count"] == 2 and "Rx one" in doc["extracted_text"]
     pages = db.get_document_pages(out["file_id"], pid, accounts["viewer"])
-    assert len(pages) == 2 and bytes(pages[0]["image_png"])[:4] == b"\x89PNG"
+    assert len(pages) == 2 and bytes(pages[0]["image_png"])[:3] == b"\xff\xd8\xff"
 
 
 def test_viewer_cannot_upload(accounts):
@@ -208,3 +208,39 @@ def test_readings_log_photo_and_typed_notes_flow(accounts):
     doc = db.get_document(out2["file_id"], pid, ed)
     assert doc["document_kind"] == "vitals_log" and doc["mime_type"] == "text/plain"
     assert len(documents.pending_review(pid, ed)[out2["file_id"]]) == 3
+
+
+def test_auto_add_confident_items_and_hold_unsure_ones(accounts):
+    """Owner's rule: items the model is sure about join the record on their
+    own; the upload ends with a summary of what was added and what needs a look."""
+    import database as db
+    import medications
+    ed = accounts["editor"]
+    pid = _patient(accounts)
+    rx = dict(RX)
+    rx["medications"] = [
+        dict(RX["medications"][0], name="Metformin", confidence=0.95, low_confidence_fields=[]),
+        dict(RX["medications"][0], name="Amlodipine", confidence=0.9, low_confidence_fields=["dose"]),
+        dict(RX["medications"][0], name="Unclear", confidence=0.4, low_confidence_fields=[]),
+    ]
+    fake = FakeProvider(responses={PrescriptionDocument: rx})
+    out = documents.ingest_upload(pid, ed, "rx.pdf", "application/pdf", make_pdf(["Rx"]), fake, kind="prescription", auto_add=True)
+    assert out["items"] == 3
+    assert [a.split(" ")[0] for a in out["added"]] == ["Metformin"]
+    assert sorted(a.split(" ")[0] for a in out["to_check"]) == ["Amlodipine", "Unclear"]
+    names = [m["name"] for m in medications.list_medications(pid, ed, status="active")]
+    assert names == ["Metformin"]
+    pending = documents.pending_review(pid, ed)[out["file_id"]]
+    assert sorted(i["payload"]["name"] for i in pending) == ["Amlodipine", "Unclear"]
+    assert any(r["action"] == "medication.add" for r in db.get_audit_log(pid))
+    # With auto-add off (the environment switch), everything waits.
+    out2 = documents.ingest_upload(pid, ed, "rx2.pdf", "application/pdf", make_pdf(["Rx two"]), fake, kind="prescription", auto_add=False)
+    assert out2["added"] == [] and len(out2["to_check"]) == 3
+
+
+def test_item_labels_and_confirmable():
+    assert documents.item_label({"item_type": "medication", "payload": {"name": "Metformin", "dose": "500 mg", "frequency": "twice daily"}}) == "Metformin 500 mg twice daily"
+    assert documents.item_label({"item_type": "lab_value", "payload": {"test_name": "HbA1c", "numeric_value": 7.8, "unit": "%"}}) == "HbA1c 7.8 %"
+    assert documents.confirmable({"item_type": "lab_value", "payload": {"numeric_value": None}}) is False
+    assert documents.confirmable({"item_type": "medication", "payload": {"name": "x"}}) is True
+    assert documents.confirmable({"item_type": "appointment", "payload": {}}) is False

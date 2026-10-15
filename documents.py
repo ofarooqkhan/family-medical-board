@@ -7,6 +7,7 @@ the document, page, and item it came from.
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -25,8 +26,72 @@ KIND_LABELS = {
 }
 
 
+# Items the model is sure about go straight into the record; the rest wait
+# for a look. The family can turn this off with AUTO_ADD_ITEMS=0.
+AUTO_ADD_MIN_CONFIDENCE = 0.6
+
+
+def auto_add_enabled(override: bool | None = None) -> bool:
+    if override is not None:
+        return override
+    return (os.environ.get("AUTO_ADD_ITEMS") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def confirmable(item: dict) -> bool:
+    """Whether an item carries enough to be written to its home table."""
+    p = item.get("payload") or {}
+    kind = item.get("item_type")
+    if kind == "lab_value":
+        return p.get("numeric_value") is not None
+    if kind == "vital":
+        return bool(extraction.rows_from_vital_payload(p))
+    if kind == "medication":
+        return bool(p.get("name"))
+    if kind == "appointment":
+        return bool(p.get("starts_at"))
+    return True
+
+
+def item_label(item: dict) -> str:
+    p = item.get("payload") or {}
+    kind = item.get("item_type")
+    if kind == "medication":
+        return " ".join(x for x in (p.get("name"), p.get("dose"), p.get("frequency")) if x)
+    if kind == "lab_value":
+        v = p.get("numeric_value") if p.get("numeric_value") is not None else p.get("value_text")
+        return f"{p.get('test_name') or 'value'} {v if v is not None else ''} {p.get('unit') or ''}".strip()
+    if kind == "vital":
+        rows = extraction.rows_from_vital_payload(p)
+        return ", ".join(f"{r['reading_type'].replace('_', ' ')} {r['value']}" for r in rows) or (p.get("kind") or "reading")
+    if kind == "appointment":
+        return f"{p.get('title') or 'follow-up'} {p.get('starts_at') or ''}".strip()
+    return (p.get("text") or f"{p.get('label', '')}: {p.get('value', '')}").strip()[:120]
+
+
+def auto_confirm(patient_id: int, file_id: int, user: dict, item_ids: list[int]) -> dict[str, list[str]]:
+    """Confirm every new item the model was sure about. Returns what was added
+    and what still needs a look, as labels for the summary."""
+    added: list[str] = []
+    to_check: list[str] = []
+    wanted = set(item_ids)
+    for it in db.list_extracted_items(patient_id, user, file_id=file_id, status="pending"):
+        if it["id"] not in wanted:
+            continue
+        sure = (it.get("confidence") or 0) >= AUTO_ADD_MIN_CONFIDENCE and not (it["payload"].get("low_confidence_fields") or [])
+        if sure and confirmable(it):
+            try:
+                confirm_item(it["id"], patient_id, user, it["payload"])
+                added.append(item_label(it))
+                continue
+            except Exception:
+                pass
+        to_check.append(item_label(it))
+    return {"added": added, "to_check": to_check}
+
+
 def ingest_upload(patient_id: int, user: dict, filename: str, mime_type: str, data: bytes,
-                  provider: Provider | None, kind: str | None = None, model: str | None = None) -> dict[str, Any]:
+                  provider: Provider | None, kind: str | None = None, model: str | None = None,
+                  auto_add: bool | None = None) -> dict[str, Any]:
     """Store the file, render pages, extract, queue items. Returns a summary dict.
 
     If provider is None the file is stored without extraction so nothing is lost
@@ -40,11 +105,13 @@ def ingest_upload(patient_id: int, user: dict, filename: str, mime_type: str, da
     summary: dict[str, Any] = {"file_id": file_id, "pages": len(pages), "items": 0, "kind": kind, "error": None, "calls": []}
     if provider is None:
         return summary
-    return run_extraction(patient_id, file_id, user, provider, kind=kind, model=model, pages=pages, summary=summary)
+    return run_extraction(patient_id, file_id, user, provider, kind=kind, model=model, pages=pages, summary=summary,
+                          auto_add=auto_add)
 
 
 def run_extraction(patient_id: int, file_id: int, user: dict, provider: Provider, kind: str | None = None,
-                   model: str | None = None, pages: list[dict] | None = None, summary: dict | None = None) -> dict[str, Any]:
+                   model: str | None = None, pages: list[dict] | None = None, summary: dict | None = None,
+                   auto_add: bool | None = None) -> dict[str, Any]:
     """Run (or re-run) extraction for a stored document. Existing pending items are replaced."""
     db.require_role(user, "editor")
     model = model or DEFAULT_MODELS["extraction"]
@@ -66,7 +133,11 @@ def run_extraction(patient_id: int, file_id: int, user: dict, provider: Provider
     _discard_pending(patient_id, file_id, user)
     ids = db.add_extracted_items(patient_id, file_id, user, result.items)
     summary.update({"kind": result.kind, "items": len(ids), "item_ids": ids, "calls": result.calls,
-                    "duration_ms": int((time.time() - t0) * 1000)})
+                    "duration_ms": int((time.time() - t0) * 1000), "added": [], "to_check": []})
+    if auto_add_enabled(auto_add) and ids:
+        summary.update(auto_confirm(patient_id, file_id, user, ids))
+    else:
+        summary["to_check"] = [item_label(i) for i in db.list_extracted_items(patient_id, user, file_id=file_id, status="pending")]
     return summary
 
 
@@ -166,7 +237,8 @@ def _maybe_mark_reviewed(patient_id: int, file_id: int, user: dict) -> None:
         db.set_document_status(file_id, patient_id, user, "reviewed")
 
 
-def stage_text_readings(patient_id: int, user: dict, text: str, provider: Provider, model: str | None = None) -> dict[str, Any]:
+def stage_text_readings(patient_id: int, user: dict, text: str, provider: Provider, model: str | None = None,
+                        auto_add: bool | None = None) -> dict[str, Any]:
     """Typed notes become a stored 'document' (the text itself) with vital items pending review,
     so they go through the same confirm step as a photo."""
     db.require_role(user, "editor")
@@ -179,4 +251,9 @@ def stage_text_readings(patient_id: int, user: dict, text: str, provider: Provid
     db.set_document_extraction(file_id, patient_id, user, extraction={"items": items, "calls": [call.as_dict()]}, model=model,
                                document_kind="vitals_log")
     ids = db.add_extracted_items(patient_id, file_id, user, items)
-    return {"file_id": file_id, "items": len(ids), "item_ids": ids, "calls": [call.as_dict()]}
+    out = {"file_id": file_id, "items": len(ids), "item_ids": ids, "calls": [call.as_dict()], "added": [], "to_check": []}
+    if auto_add_enabled(auto_add) and ids:
+        out.update(auto_confirm(patient_id, file_id, user, ids))
+    else:
+        out["to_check"] = [item_label(i) for i in items]
+    return out

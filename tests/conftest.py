@@ -25,6 +25,8 @@ def _reset_schema():
 @pytest.fixture
 def db(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", TEST_URL)
+    # Most tests exercise the manual confirm step; auto-add has its own tests.
+    monkeypatch.setenv("AUTO_ADD_ITEMS", "0")
     import database
     database.close_pool()
     _reset_schema()
