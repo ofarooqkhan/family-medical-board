@@ -192,3 +192,37 @@ def test_run_board_survives_a_failing_specialist(accounts):
     run = board.run_board(pid, user, "full review", fake, agents=_agents())
     assert run["status"] == "partial" and run["errors"]
     assert len(run["specialist_outputs"]) == 3
+
+
+@pytestmark_db
+def test_every_specialist_remembers_its_review_and_memories_are_editable(accounts):
+    import database as db
+    admin, editor, viewer = accounts["admin"], accounts["editor"], accounts["viewer"]
+    pid = db.create_patient(admin, "Parent One")
+    provider = FakeProvider(responses={SpecialistOutput: _specialist_response, CoordinatorOutput: COORD})
+    run = board.run_board(pid, editor, "What do the records show about blood pressure?", provider)
+    assert run["status"] == "done" and run["routed_agents"]
+    mems = db.list_doctor_memories(pid, viewer)
+    by_agent = {m["doctor_type"] for m in mems}
+    for agent in run["routed_agents"]:
+        assert agent in by_agent, (agent, by_agent)
+    assert "coordinator" in by_agent
+    assert all(m["source_run_id"] == run["id"] for m in mems if m["memory_type"] in ("review", "board_summary"))
+    assert all(m["created_by"] == editor["id"] for m in mems)
+    first = next(m for m in mems if m["memory_type"] == "review")
+    with pytest.raises(PermissionError):
+        db.update_doctor_memory(first["id"], pid, viewer, "x")
+    db.update_doctor_memory(first["id"], pid, editor, "Corrected by the family.", 9)
+    fresh = next(m for m in db.list_doctor_memories(pid, viewer) if m["id"] == first["id"])
+    assert fresh["content"] == "Corrected by the family." and fresh["importance"] == 9 and fresh["updated_by"] == editor["id"]
+    other = db.create_patient(admin, "Parent Two")
+    with pytest.raises(PermissionError):
+        db.delete_doctor_memory(first["id"], other, editor)
+    db.delete_doctor_memory(first["id"], pid, editor)
+    assert first["id"] not in {m["id"] for m in db.list_doctor_memories(pid, viewer)}
+    with pytest.raises(PermissionError):
+        db.clear_doctor_memories(pid, editor)
+    n = db.clear_doctor_memories(pid, admin, "coordinator")
+    assert n >= 1 and "coordinator" not in {m["doctor_type"] for m in db.list_doctor_memories(pid, viewer)}
+    actions = [r["action"] for r in db.get_audit_log(pid)]
+    assert {"memory.update", "memory.delete", "memory.clear"} <= set(actions)

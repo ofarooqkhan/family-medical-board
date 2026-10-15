@@ -413,9 +413,18 @@ def run_board(patient_id: int, user: dict, query: str, provider: Provider, langu
         db.audit(cur, user, patient_id, "board.run", "board_run", run_id,
                  {"agents": chosen, "cost_usd": cost, "status": status, "declined": coordinator.declined_advice_request})
 
+    # Every agent that took part remembers what it concluded, tied to this run,
+    # so the family can read, correct or delete it on the Memory page.
+    for o in outputs:
+        parts = [o.summary.strip()] if o.summary else []
+        for ob in o.observations[:3]:
+            parts.append(ob.text.strip())
+        memo = " ".join(p for p in parts if p)
+        if memo and not o.declined_advice_request:
+            db.save_doctor_memory(patient_id, user, o.agent_type, "review", memo[:900], importance=5, source_run_id=run_id)
     if coordinator.what_changed or coordinator.questions_by_doctor:
         memo = coordinator.headline + " " + " ".join(coordinator.what_changed[:3])
-        db.save_doctor_memory(patient_id, user, "coordinator", "board_summary", memo[:900], importance=4)
+        db.save_doctor_memory(patient_id, user, "coordinator", "board_summary", memo[:900], importance=4, source_run_id=run_id)
 
     return {
         "id": run_id, "patient_id": patient_id, "query": query, "language": language, "routed_agents": chosen,

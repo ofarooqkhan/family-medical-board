@@ -600,12 +600,19 @@ def update_doctor_agent(user: dict, agent_type: str, **fields) -> None:
 # ---------------------------------------------------------------------------
 
 def save_doctor_memory(patient_id: int, user: dict, doctor_type: str, memory_type: str, content: str,
-                       importance: int = 5, source_file_id: int | None = None) -> None:
+                       importance: int = 5, source_file_id: int | None = None, source_run_id: int | None = None,
+                       source_consultation_id: int | None = None) -> int:
+    """One agent remembers one thing about one patient. Every memory records
+    who or what produced it so a wrong one can be traced and removed."""
     require_role(user, "viewer")
     with db_cursor(commit=True) as cur:
         _assert_patient(cur, patient_id)
-        cur.execute("""INSERT INTO doctor_memory (patient_id, doctor_type, memory_type, content, importance, source_file_id)
-                       VALUES (%s, %s, %s, %s, %s, %s)""", (patient_id, doctor_type, memory_type, content, importance, source_file_id))
+        cur.execute("""INSERT INTO doctor_memory (patient_id, doctor_type, memory_type, content, importance, source_file_id,
+                                                  source_run_id, source_consultation_id, created_by)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                    (patient_id, doctor_type, memory_type, content, importance, source_file_id, source_run_id,
+                     source_consultation_id, (user or {}).get("id")))
+        return cur.fetchone()["id"]
 
 
 def get_doctor_memories(patient_id: int, user: dict, doctor_type: str | None = None, limit: int = 50):
@@ -618,6 +625,52 @@ def get_doctor_memories(patient_id: int, user: dict, doctor_type: str | None = N
             cur.execute("""SELECT * FROM doctor_memory WHERE patient_id = %s
                            ORDER BY importance DESC, created_at DESC LIMIT %s""", (patient_id, limit))
         return cur.fetchall()
+
+
+def list_doctor_memories(patient_id: int, user: dict, limit: int = 500):
+    """Every memory for a patient, newest first, for the Memory screen."""
+    require_role(user, "viewer")
+    with db_cursor() as cur:
+        cur.execute("""SELECT m.*, u.display_name AS created_by_name
+                       FROM doctor_memory m LEFT JOIN users u ON u.id = m.created_by
+                       WHERE m.patient_id = %s ORDER BY m.created_at DESC, m.id DESC LIMIT %s""", (patient_id, limit))
+        return cur.fetchall()
+
+
+def update_doctor_memory(memory_id: int, patient_id: int, user: dict, content: str, importance: int | None = None) -> None:
+    require_role(user, "editor")
+    content = (content or "").strip()
+    if not content:
+        raise ValueError("memory text cannot be empty")
+    with db_cursor(commit=True) as cur:
+        cur.execute("""UPDATE doctor_memory SET content = %s, importance = COALESCE(%s, importance), updated_at = CURRENT_TIMESTAMP,
+                       updated_by = %s WHERE id = %s AND patient_id = %s""", (content, importance, user["id"], memory_id, patient_id))
+        if cur.rowcount != 1:
+            raise PermissionError(f"no memory {memory_id} for patient {patient_id}")
+        audit(cur, user, patient_id, "memory.update", "memory", memory_id, {"content": content[:200], "importance": importance})
+
+
+def delete_doctor_memory(memory_id: int, patient_id: int, user: dict) -> None:
+    require_role(user, "editor")
+    with db_cursor(commit=True) as cur:
+        cur.execute("DELETE FROM doctor_memory WHERE id = %s AND patient_id = %s RETURNING doctor_type, content", (memory_id, patient_id))
+        row = cur.fetchone()
+        if row is None:
+            raise PermissionError(f"no memory {memory_id} for patient {patient_id}")
+        audit(cur, user, patient_id, "memory.delete", "memory", memory_id, {"doctor_type": row["doctor_type"], "content": row["content"][:200]})
+
+
+def clear_doctor_memories(patient_id: int, user: dict, doctor_type: str | None = None) -> int:
+    """Admin wipes one agent's memory (or all agents') for a patient."""
+    require_role(user, "admin")
+    with db_cursor(commit=True) as cur:
+        if doctor_type:
+            cur.execute("DELETE FROM doctor_memory WHERE patient_id = %s AND doctor_type = %s", (patient_id, doctor_type))
+        else:
+            cur.execute("DELETE FROM doctor_memory WHERE patient_id = %s", (patient_id,))
+        n = cur.rowcount
+        audit(cur, user, patient_id, "memory.clear", "memory", None, {"doctor_type": doctor_type, "count": n})
+        return n
 
 
 # ---------------------------------------------------------------------------

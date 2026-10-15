@@ -52,10 +52,10 @@ INSERT INTO doctor_agents (agent_type, display_name, role, goal, backstory)
 EXPECTED_TABLES = {
     "users", "patients", "conversations", "patient_files", "vitals_history", "doctor_agents", "doctor_memory",
     "chat_history", "alembic_version", "invites", "audit_log", "document_pages", "extracted_items", "medications",
-    "medication_changes", "appointments", "board_runs", "sessions",
+    "medication_changes", "appointments", "board_runs", "sessions", "consultations",
 }
 
-HEAD = "0005"
+HEAD = "0007"
 
 
 def _raw():
