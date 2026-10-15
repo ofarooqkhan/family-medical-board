@@ -118,6 +118,14 @@ class OpenAIProvider:
         url = base_url or os.environ.get("OPENAI_BASE_URL") or os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
         self._client = openai.OpenAI(api_key=key, base_url=url) if url else openai.OpenAI(api_key=key)
 
+    def _parse_fn(self):
+        """Structured outputs moved from client.beta.chat.completions.parse (SDK 1.x)
+        to client.chat.completions.parse (SDK 2+). Support both."""
+        fn = getattr(self._client.chat.completions, "parse", None)
+        if fn is None:
+            fn = self._client.beta.chat.completions.parse
+        return fn
+
     @staticmethod
     def _content(parts: list[Part]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -133,7 +141,7 @@ class OpenAIProvider:
         call = ModelCall(self.name, model, purpose)
         t0 = time.time()
         try:
-            completion = self._client.chat.completions.parse(
+            completion = self._parse_fn()(
                 model=model,
                 messages=[{"role": "system", "content": system},
                           {"role": "user", "content": self._content(parts)}],
