@@ -660,6 +660,9 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0o Round 10 live (2026-10-15)
+`64f99bc` synced and republished from the connector; deployment running.
+
 ### 8.0n Round 10: medication lists and an explained empty result (2026-10-15)
 The owner uploaded a screenshot of a medicine table (brand and generic
 names, doses, status remarks) and the app found nothing. Fixes: a new
