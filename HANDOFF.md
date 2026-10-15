@@ -660,6 +660,16 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0c Repl git remote (2026-10-15)
+The Repl's `origin` pointed at the retired `medical-board-history`
+repository, so fetches failed with an auth error and Replit Agent had
+re-typed earlier changes by hand (its own commit `2c10324`). The remote is
+now set to the public `family-medical-board` repository, which needs no
+token. Sync command inside the Repl:
+`git fetch origin main && git checkout -B main origin/main`.
+Python 3.11 runs there and in CI: no nested same-quote f-strings
+(`0734f61` fixed two).
+
 ### 8.0b Publishing after rounds 2 to 6 (owner action)
 `publish_app` from the connector is refused once the schema changed:
 "applying database changes to the live app needs a review that is only
