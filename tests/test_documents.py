@@ -167,3 +167,44 @@ def test_confirm_is_scoped_by_patient(accounts):
         documents.confirm_item(item["id"], b, ed, item["payload"])
     with pytest.raises(PermissionError):
         documents.confirm_item(item["id"], a, accounts["viewer"], item["payload"])
+
+
+LOG = {
+    "patient_name": None, "device": "Omron", "overall_confidence": 0.9,
+    "readings": [
+        {"kind": "blood_pressure", "name": None, "value": None, "systolic": 142, "diastolic": 88, "pulse": 71, "unit": "mmHg",
+         "recorded_at": "2026-10-01 08:00", "notes": "morning", "page": 1, "confidence": 0.95, "low_confidence_fields": []},
+        {"kind": "glucose", "name": None, "value": 150, "systolic": None, "diastolic": None, "pulse": None, "unit": "mg/dL",
+         "recorded_at": "2026-10-02", "notes": "fasting", "page": 1, "confidence": 0.9, "low_confidence_fields": []},
+        {"kind": "weight", "name": None, "value": 71, "systolic": None, "diastolic": None, "pulse": None, "unit": "kg",
+         "recorded_at": None, "notes": None, "page": 1, "confidence": 0.8, "low_confidence_fields": ["recorded_at"]},
+    ],
+}
+
+
+def test_readings_log_photo_and_typed_notes_flow(accounts):
+    import database as db
+    from extraction import VitalsLogDocument
+    ed = accounts["editor"]
+    pid = _patient(accounts)
+    fake = FakeProvider(responses={VitalsLogDocument: LOG})
+    out = documents.ingest_upload(pid, ed, "bp-diary.png", "image/png", make_png(), provider=fake, kind="vitals_log")
+    assert out["items"] == 3
+    items = documents.pending_review(pid, ed)[out["file_id"]]
+    assert [i["item_type"] for i in items] == ["vital", "vital", "vital"]
+    res = documents.confirm_item(items[0]["id"], pid, ed, items[0]["payload"])
+    assert len(res["vital_ids"]) == 3  # systolic, diastolic, pulse
+    documents.confirm_item(items[1]["id"], pid, ed, items[1]["payload"])
+    documents.confirm_item(items[2]["id"], pid, ed, items[2]["payload"])
+    latest = {v["reading_type"]: v for v in db.get_latest_vitals(pid, ed)}
+    assert latest["blood_pressure_systolic"]["value"] == 142 and str(latest["blood_pressure_systolic"]["recorded_at"]) == "2026-10-01 08:00:00"
+    assert latest["heart_rate"]["value"] == 71 and latest["glucose"]["value"] == 150 and latest["weight"]["unit"] == "kg"
+    assert latest["weight"]["recorded_at"] is None
+    assert latest["glucose"]["source_file_id"] == out["file_id"]
+
+    # Typed notes go through the same review step, stored as a text document.
+    out2 = documents.stage_text_readings(pid, ed, "BP 142/88 pulse 71 on 1 Oct morning", fake)
+    assert out2["items"] == 3 and fake.calls[-1]["purpose"] == "extract:text_readings"
+    doc = db.get_document(out2["file_id"], pid, ed)
+    assert doc["document_kind"] == "vitals_log" and doc["mime_type"] == "text/plain"
+    assert len(documents.pending_review(pid, ed)[out2["file_id"]]) == 3

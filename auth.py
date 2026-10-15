@@ -91,6 +91,8 @@ def signup(email: str, password: str, display_name: str, invite_code: str | None
                 raise AuthError("That invite code is not valid.")
             if invite["expires_at"] and invite["expires_at"] < _utcnow():
                 raise AuthError("That invite code has expired.")
+            if invite.get("email") and invite["email"].strip().lower() != email:
+                raise AuthError("This invite was issued for a different email address.")
             role = invite["role"]
         if legacy_id:
             user_id = legacy_id
@@ -184,17 +186,36 @@ def reset_password(admin: dict, target_user_id: str) -> str:
     return temp
 
 
-def create_invite(admin: dict, role: str = "viewer", days: int = INVITE_DAYS) -> dict:
+def create_invite(admin: dict, role: str = "viewer", days: int = INVITE_DAYS, email: str | None = None,
+                  note: str | None = None) -> dict:
+    """Make a one-time invite. With email set, only that address can use it."""
     require_role(admin, "admin")
     if role not in ROLE_RANK:
         raise ValueError(f"unknown role {role}")
+    email = (email or "").strip().lower() or None
+    if email and not _EMAIL_RE.match(email):
+        raise AuthError("Enter a valid email address for the invite, or leave it blank.")
     code = secrets.token_urlsafe(12)
     with db_cursor(commit=True) as cur:
-        cur.execute("""INSERT INTO invites (code, role, created_by, expires_at) VALUES (%s, %s, %s, %s) RETURNING *""",
-                    (code, role, admin["id"], _utcnow() + timedelta(days=days)))
+        cur.execute("""INSERT INTO invites (code, role, created_by, expires_at, email, note)
+                       VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+                    (code, role, admin["id"], _utcnow() + timedelta(days=days), email, note))
         row = dict(cur.fetchone())
-        audit(cur, admin, None, "invite.create", "invite", row["id"], {"role": role})
+        audit(cur, admin, None, "invite.create", "invite", row["id"], {"role": role, "email": email})
         return row
+
+
+def invite_link(base_url: str, code: str) -> str:
+    """Link that opens the app with the invite code pre-filled."""
+    base = (base_url or "").rstrip("/")
+    return f"{base}/?invite={code}"
+
+
+def invite_message(base_url: str, invite: dict, app_name: str = "Family Medical Board") -> str:
+    link = invite_link(base_url, invite["code"])
+    who = f" for {invite['email']}" if invite.get("email") else ""
+    return (f"You are invited to {app_name}{who}. Open this link, choose Create account, and set a password: {link} "
+            f"(your invite code is {invite['code']}; it works once and expires in {INVITE_DAYS} days).")
 
 
 def list_invites(admin: dict):

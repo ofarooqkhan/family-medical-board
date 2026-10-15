@@ -22,7 +22,7 @@ MAX_PAGES = 12
 RENDER_DPI = 150
 MAX_IMAGE_SIDE = 2000
 
-DocumentKind = Literal["prescription", "lab_report", "imaging_report", "discharge_summary", "other"]
+DocumentKind = Literal["prescription", "lab_report", "imaging_report", "discharge_summary", "vitals_log", "other"]
 
 TRANSCRIBE_RULES = (
     "Transcribe only what is printed or handwritten on the pages. Do not infer, complete, or "
@@ -130,7 +130,34 @@ class GenericDocument(BaseModel):
     overall_confidence: float
 
 
+VitalKind = Literal["blood_pressure", "glucose", "weight", "heart_rate", "temperature", "oxygen_saturation", "other"]
+
+
+class VitalReading(BaseModel):
+    """One reading from a home log: a BP diary, glucose meter screenshot, weight chart, or typed notes."""
+    kind: VitalKind
+    name: Optional[str] = None  # for kind other, e.g. "steps"
+    value: Optional[float] = None  # glucose, weight, pulse, temperature, SpO2, other
+    systolic: Optional[float] = None
+    diastolic: Optional[float] = None
+    pulse: Optional[float] = None
+    unit: Optional[str] = None
+    recorded_at: Optional[str] = None  # date or date and time as written
+    notes: Optional[str] = None
+    page: int
+    confidence: float
+    low_confidence_fields: list[str]
+
+
+class VitalsLogDocument(BaseModel):
+    patient_name: Optional[str] = None
+    device: Optional[str] = None
+    readings: list[VitalReading]
+    overall_confidence: float
+
+
 SCHEMA_FOR_KIND: dict[str, type[BaseModel]] = {
+    "vitals_log": VitalsLogDocument,
     "prescription": PrescriptionDocument,
     "lab_report": LabReportDocument,
     "imaging_report": ImagingReportDocument,
@@ -252,6 +279,7 @@ def extract(provider: Provider, model: str, pages: list[dict[str, Any]], kind: s
         "lab_report": "This is a laboratory report. Capture every test row as its own item, with the unit and reference range as printed.",
         "imaging_report": "This is an imaging report (X-ray, CT, MRI, ultrasound). Capture each finding and impression sentence as its own item.",
         "discharge_summary": "This is a discharge summary or clinical letter. Capture the key facts and every medication mentioned by name.",
+        "vitals_log": "This is a home readings log (blood pressure diary, glucose meter screenshot or logbook, weight or oxygen chart). Capture every reading as its own item with its date and time as written.",
         "other": "Capture the key facts and every medication mentioned by name.",
     }.get(kind, "Capture the key facts.")
     system = f"You extract data from one medical document for a family caregiver's record system. {focus} {TRANSCRIBE_RULES}"
@@ -373,6 +401,14 @@ def items_from_document(kind: str, doc: BaseModel) -> list[dict[str, Any]]:
                 "payload": {"text": f.text, "section": f.section, "modality": doc.modality, "body_part": doc.body_part,
                             "study_date": doc.study_date, "radiologist": doc.radiologist, "low_confidence_fields": []},
             })
+    elif isinstance(doc, VitalsLogDocument):
+        for r in doc.readings:
+            items.append({
+                "page_number": r.page, "item_type": "vital", "confidence": _clamp(r.confidence),
+                "payload": {"kind": r.kind, "name": r.name, "value": r.value, "systolic": r.systolic, "diastolic": r.diastolic,
+                            "pulse": r.pulse, "unit": r.unit, "recorded_at": r.recorded_at, "notes": r.notes,
+                            "device": doc.device, "low_confidence_fields": r.low_confidence_fields},
+            })
     elif isinstance(doc, GenericDocument):
         for f in doc.facts:
             items.append({"page_number": f.page, "item_type": "fact", "confidence": _clamp(f.confidence),
@@ -384,3 +420,62 @@ def items_from_document(kind: str, doc: BaseModel) -> list[dict[str, Any]]:
                                       "duration": None, "instructions": None, "prescriber": doc.author, "clinic": None,
                                       "start_date": doc.document_date, "low_confidence_fields": ["dose", "frequency"]}})
     return items
+
+
+def readings_from_text(provider: Provider, model: str, text: str) -> tuple[list[dict[str, Any]], ModelCall]:
+    """Turn typed or pasted notes ("BP 140/90 on 1 Oct morning, sugar 150 fasting 2 Oct")
+    into vital items ready for review. No file is stored."""
+    system = ("You turn a caregiver's typed notes into structured home readings. " + TRANSCRIBE_RULES +
+              " There are no page images; set page to 1 for every reading. Today's date is unknown: if a note gives "
+              "a day without a year, return it as written and leave the caller to resolve it.")
+    doc, call = provider.structured(model=model, system=system, parts=[Part.of_text(text)], schema=VitalsLogDocument,
+                                    purpose="extract:text_readings", max_tokens=3000)
+    return items_from_document("vitals_log", doc), call
+
+
+# Canonical reading_type for each vital kind, matching the manual entry form.
+VITAL_ROWS = {
+    "glucose": ("glucose", "mg/dL"),
+    "weight": ("weight", "kg"),
+    "heart_rate": ("heart_rate", "bpm"),
+    "temperature": ("temperature", "C"),
+    "oxygen_saturation": ("oxygen_saturation", "%"),
+}
+
+
+def rows_from_vital_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expand one vital item into vitals_history rows (blood pressure becomes two or three)."""
+    from datetime import datetime, time as dtime
+
+    when = payload.get("recorded_at")
+    recorded = None
+    if when:
+        try:
+            recorded = datetime.fromisoformat(str(when).replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            d = parse_date(when)
+            recorded = datetime.combine(d, dtime(0, 0)) if d else None
+    notes = payload.get("notes") or ""
+    kind = payload.get("kind") or "other"
+    rows: list[dict[str, Any]] = []
+
+    def row(reading_type: str, value: Any, unit: str | None) -> None:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return
+        rows.append({"reading_type": reading_type, "value": v, "unit": unit, "recorded_at": recorded, "notes": notes})
+
+    if kind == "blood_pressure":
+        row("blood_pressure_systolic", payload.get("systolic"), "mmHg")
+        row("blood_pressure_diastolic", payload.get("diastolic"), "mmHg")
+        row("heart_rate", payload.get("pulse"), "bpm")
+    elif kind in VITAL_ROWS:
+        reading_type, default_unit = VITAL_ROWS[kind]
+        row(reading_type, payload.get("value"), payload.get("unit") or default_unit)
+        if kind != "heart_rate":
+            row("heart_rate", payload.get("pulse"), "bpm")
+    else:
+        name = slug(payload.get("name") or "other") or "other"
+        row(name, payload.get("value"), payload.get("unit"))
+    return rows

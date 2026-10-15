@@ -19,6 +19,7 @@ KIND_LABELS = {
     "lab_report": "Lab report",
     "imaging_report": "Imaging report",
     "discharge_summary": "Discharge summary or letter",
+    "vitals_log": "Readings log (BP, sugar, weight)",
     "other": "Other document",
 }
 
@@ -121,6 +122,17 @@ def confirm_item(item_id: int, patient_id: int, user: dict, payload: dict[str, A
             reference_range=payload.get("reference_range"), flag=payload.get("flag"),
         )
         out["vital_id"] = vid
+    elif kind == "vital":
+        rows = extraction.rows_from_vital_payload(payload)
+        if not rows:
+            raise ValueError("a numeric value is required to confirm a reading")
+        out["vital_ids"] = [
+            db.save_vital_reading(patient_id, user, r["reading_type"], r["value"], r["unit"],
+                                  source=f"Readings log: document {item['file_id']}", notes=r["notes"], raw_data=payload,
+                                  recorded_at=r["recorded_at"], source_file_id=item["file_id"], source_page=item["page_number"],
+                                  extracted_item_id=item_id)
+            for r in rows
+        ]
     elif kind in ("imaging_finding", "diagnosis", "fact"):
         text = payload.get("text") or f"{payload.get('label', '')}: {payload.get('value', '')}"
         doctor = {"imaging_finding": "radiologist", "diagnosis": "general_duty", "fact": "general_duty"}[kind]
@@ -140,3 +152,19 @@ def reject_item(item_id: int, patient_id: int, user: dict) -> None:
 def _maybe_mark_reviewed(patient_id: int, file_id: int, user: dict) -> None:
     if not db.list_extracted_items(patient_id, user, file_id=file_id, status="pending"):
         db.set_document_status(file_id, patient_id, user, "reviewed")
+
+
+def stage_text_readings(patient_id: int, user: dict, text: str, provider: Provider, model: str | None = None) -> dict[str, Any]:
+    """Typed notes become a stored 'document' (the text itself) with vital items pending review,
+    so they go through the same confirm step as a photo."""
+    db.require_role(user, "editor")
+    model = model or DEFAULT_MODELS["extraction"]
+    items, call = extraction.readings_from_text(provider, model, text)
+    file_id = db.save_document(patient_id, user, f"typed-readings-{time.strftime('%Y%m%d-%H%M')}.txt", "text/plain",
+                               text.encode("utf-8"), document_kind="vitals_log",
+                               pages=[{"page_number": 1, "image_png": None, "width": None, "height": None, "text": text}],
+                               extracted_text=text)
+    db.set_document_extraction(file_id, patient_id, user, extraction={"items": items, "calls": [call.as_dict()]}, model=model,
+                               document_kind="vitals_log")
+    ids = db.add_extracted_items(patient_id, file_id, user, items)
+    return {"file_id": file_id, "items": len(ids), "item_ids": ids, "calls": [call.as_dict()]}

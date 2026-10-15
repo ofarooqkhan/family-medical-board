@@ -55,7 +55,7 @@ EXPECTED_TABLES = {
     "medication_changes", "appointments", "board_runs",
 }
 
-HEAD = "0003"
+HEAD = "0004"
 
 
 def _raw():
@@ -216,6 +216,20 @@ def test_forgot_password_with_family_reset_code(accounts, monkeypatch):
     auth.login("viewer@example.com", "a brand new password")
     with pytest.raises(auth.AuthError):
         auth.login("viewer@example.com", "correct horse battery")
+
+
+def test_invite_bound_to_email_rejects_other_addresses(accounts):
+    import auth
+    inv = auth.create_invite(accounts["admin"], "editor", email="Sister@Example.com", note="Sister")
+    assert inv["email"] == "sister@example.com" and inv["note"] == "Sister"
+    with pytest.raises(auth.AuthError):
+        auth.signup("someone-else@example.com", "correct horse battery", "X", inv["code"])
+    user = auth.signup("sister@example.com", "correct horse battery", "Sister", inv["code"])
+    assert user["role"] == "editor"
+    with pytest.raises(auth.AuthError):
+        auth.create_invite(accounts["admin"], "viewer", email="not-an-email")
+    assert auth.invite_link("https://app.example.com/", "abc") == "https://app.example.com/?invite=abc"
+    assert "abc" in auth.invite_message("https://app.example.com", {"code": "abc", "email": "sister@example.com"})
 
 
 def test_login_rejects_wrong_password_and_disabled_accounts(accounts):

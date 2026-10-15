@@ -22,13 +22,15 @@ import brief as brief_mod
 import database as db
 import documents
 import medications as meds
-from extraction import parse_date
+import values_import
+from extraction import parse_date, rows_from_vital_payload as extraction_rows
 from providers import ProviderError, get_provider
 
 APP_TITLE = "Family Medical Board"
 DISCLAIMER = "This app keeps records and lists questions for the treating doctors. It never gives medical advice."
 KINDS = {"auto": "Detect automatically", "prescription": "Prescription", "lab_report": "Lab report",
-         "imaging_report": "Imaging report", "discharge_summary": "Discharge summary or letter", "other": "Other"}
+         "imaging_report": "Imaging report", "vitals_log": "Readings log (BP, sugar, weight)",
+         "discharge_summary": "Discharge summary or letter", "other": "Other"}
 LANGS = {"en": "English", "ur": "Urdu"}
 
 
@@ -72,6 +74,21 @@ def _denied(e: Exception) -> None:
     st.error("You do not have access to do that." if isinstance(e, PermissionError) else str(e))
 
 
+def _guess_base_url() -> str:
+    """Public URL for invite links: APP_BASE_URL, else the Replit deployment host, else the request host."""
+    for key in ("REPLIT_DEPLOYMENT_URL", "REPLIT_DEV_DOMAIN"):
+        v = os.environ.get(key)
+        if v:
+            return v if v.startswith("http") else f"https://{v}"
+    try:
+        host = st.context.headers.get("host")
+        if host:
+            return f"https://{host}"
+    except Exception:
+        pass
+    return ""
+
+
 def _fmt(v) -> str:
     if v is None:
         return ""
@@ -90,6 +107,11 @@ def render_login() -> None:
     st.title(APP_TITLE)
     st.caption(DISCLAIMER)
     first = auth.is_first_user()
+    invite_param = (st.query_params.get("invite") or "").strip()
+    if invite_param and "signup_code" not in st.session_state:
+        st.session_state.signup_code = invite_param
+    if invite_param:
+        st.success("You have an invite. Open the Create account tab, enter your name and email, and choose a password.")
     tab_in, tab_up, tab_forgot = st.tabs(["Sign in", "Create account", "Forgot password"])
     with tab_in:
         with st.form("login"):
@@ -104,8 +126,8 @@ def render_login() -> None:
     with tab_up:
         if first:
             st.info("No accounts exist yet. The first account becomes the admin.")
-        else:
-            st.info("You need an invite code from the family admin.")
+        elif not invite_param:
+            st.info("Accounts are by invitation only. Ask the family admin for an invite link or code.")
         with st.form("signup"):
             name = st.text_input("Your name", key="signup_name")
             email = st.text_input("Email", key="signup_email")
@@ -255,10 +277,20 @@ def _patient_form(patient: dict) -> None:
             except Exception as e:
                 _denied(e)
     if _can("admin"):
-        if st.button("Archive this patient", key="archive_patient"):
+        c1, c2 = st.columns(2)
+        if c1.button("Archive this patient", key="archive_patient", help="Hides the patient; records are kept."):
             db.archive_patient(patient["id"], u)
             st.session_state.current_patient_id = None
             st.rerun()
+        confirm = c2.text_input("Type DELETE to remove this patient and every record permanently", key="delete_patient_confirm")
+        if c2.button("Delete patient permanently", key="delete_patient", type="secondary", disabled=confirm != "DELETE"):
+            try:
+                db.delete_patient(patient["id"], u)
+                st.session_state.current_patient_id = None
+                st.success("Patient deleted.")
+                st.rerun()
+            except Exception as e:
+                _denied(e)
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +345,11 @@ def _review_section(pid: int) -> None:
         st.caption("Nothing waiting for review.")
         return
     st.caption("Nothing is saved to the record until you confirm it here. Correct any field first if needed.")
+    _review_items(pid, grouped)
+
+
+def _review_items(pid: int, grouped: dict) -> None:
+    u = _user()
     editable = _can("editor")
     for file_id, items in grouped.items():
         doc = db.get_document(file_id, pid, u)
@@ -343,6 +380,8 @@ def _review_section(pid: int) -> None:
 def _confirmable(item: dict) -> bool:
     if item["item_type"] == "lab_value":
         return item["payload"].get("numeric_value") is not None
+    if item["item_type"] == "vital":
+        return bool(extraction_rows(item["payload"]))
     if item["item_type"] == "medication":
         return bool(item["payload"].get("name"))
     return True
@@ -364,6 +403,20 @@ def _item_editor(it: dict, pid: int, editable: bool) -> None:
             for f in ("name", "generic_name", "dose", "route", "frequency", "prescriber", "start_date", "instructions"):
                 label = f.replace("_", " ").title() + (" (unsure)" if f in low else "")
                 new[f] = st.text_input(label, p.get(f) or "", key=f"{key}_{f}") or None
+        elif it["item_type"] == "vital":
+            kinds = ["blood_pressure", "glucose", "weight", "heart_rate", "temperature", "oxygen_saturation", "other"]
+            new["kind"] = st.selectbox("Kind", kinds, index=kinds.index(p.get("kind") or "other"), key=f"{key}_kind")
+            if (p.get("kind") or "") == "blood_pressure":
+                c1, c2, c3 = st.columns(3)
+                new["systolic"] = c1.number_input("Systolic", value=float(p.get("systolic") or 0), key=f"{key}_sys")
+                new["diastolic"] = c2.number_input("Diastolic", value=float(p.get("diastolic") or 0), key=f"{key}_dia")
+                new["pulse"] = c3.number_input("Pulse", value=float(p.get("pulse") or 0), key=f"{key}_pulse") or None
+            else:
+                new["name"] = st.text_input("Name (for other)", p.get("name") or "", key=f"{key}_name") or None
+                new["value"] = st.number_input("Value" + (" (unsure)" if "value" in low else ""), value=float(p.get("value") or 0), format="%.2f", key=f"{key}_val")
+                new["unit"] = st.text_input("Unit", p.get("unit") or "", key=f"{key}_unit") or None
+            new["recorded_at"] = st.text_input("Date and time as written" + (" (unsure)" if "recorded_at" in low else ""), p.get("recorded_at") or "", key=f"{key}_when") or None
+            new["notes"] = st.text_input("Notes", p.get("notes") or "", key=f"{key}_notes") or None
         elif it["item_type"] == "lab_value":
             new["test_name"] = st.text_input("Test" + (" (unsure)" if "test_name" in low else ""), p.get("test_name") or "", key=f"{key}_test")
             new["numeric_value"] = st.number_input("Value" + (" (unsure)" if "numeric_value" in low else ""),
@@ -444,6 +497,37 @@ def page_medications() -> None:
     if not pid:
         return
     st.title("Medications")
+    provider = _provider()
+    if _can("editor"):
+        with st.expander("Add from a prescription photo or PDF", expanded=not meds.list_medications(pid, u, status="active")):
+            st.caption("Upload the prescription. The medicines are read out for you to check and confirm; nothing is saved until you confirm.")
+            c1, c2 = st.columns(2)
+            files = c1.file_uploader("Prescription files", type=["pdf", "jpg", "jpeg", "png", "webp"], accept_multiple_files=True, key="rx_uploader")
+            shot = c2.camera_input("Or take a photo of it", key="rx_camera")
+            uploads = list(files or []) + ([shot] if shot is not None else [])
+            if uploads and st.button("Read the prescription", type="primary", key="rx_upload_btn"):
+                for f in uploads:
+                    name = getattr(f, "name", None) or f"prescription-{datetime.now():%Y%m%d-%H%M%S}.jpg"
+                    with st.spinner(f"Reading {name}..."):
+                        try:
+                            out = documents.ingest_upload(pid, u, name, getattr(f, "type", None) or "application/octet-stream",
+                                                          f.getvalue(), provider, kind="prescription")
+                        except Exception as e:
+                            _denied(e)
+                            continue
+                    if out.get("error"):
+                        st.error(f"{name}: stored, but reading it failed: {out['error']}")
+                    elif provider is None:
+                        st.warning(f"{name}: stored, but no model key is configured so nothing was read.")
+                    else:
+                        st.success(f"{name}: {out['items']} items found. Check them below.")
+                st.rerun()
+    pending_meds = {fid: [i for i in items if i["item_type"] in ("medication", "diagnosis")]
+                    for fid, items in documents.pending_review(pid, u).items()}
+    pending_meds = {fid: items for fid, items in pending_meds.items() if items}
+    if pending_meds:
+        st.subheader("Check these before they join the list")
+        _review_items(pid, pending_meds)
     found = meds.find_duplicates(pid, u)
     for g in found.get("duplicates", []):
         st.warning("Possible duplicate: " + ", ".join(f"{m['name']} ({m.get('prescriber') or 'unknown prescriber'})" for m in g))
@@ -523,8 +607,70 @@ def page_values() -> None:
         st.dataframe(table, hide_index=True, width="stretch")
     else:
         st.caption("No values yet. Upload a lab report or add one below.")
+    pending_vitals = {fid: [i for i in items if i["item_type"] == "vital"] for fid, items in documents.pending_review(pid, u).items()}
+    pending_vitals = {fid: items for fid, items in pending_vitals.items() if items}
+    if pending_vitals:
+        st.subheader("Check these readings before they are saved")
+        _review_items(pid, pending_vitals)
     if _can("editor"):
-        with st.form("add_value", clear_on_submit=True):
+        provider = _provider()
+        tab_file, tab_text, tab_photo, tab_manual = st.tabs(["Import a spreadsheet", "Paste or type readings", "Photo of a log", "One reading by hand"])
+        with tab_file:
+            st.caption("CSV or Excel. Columns such as date, type, value, unit, or systolic, diastolic, pulse, or one column per reading (glucose, weight, SpO2) are recognised. You can correct the preview before adding.")
+            up = st.file_uploader("Spreadsheet", type=["csv", "xlsx", "xls", "tsv", "txt"], key="values_file")
+            if up is not None:
+                try:
+                    rows = values_import.parse_table(up.getvalue(), up.name)
+                except Exception as e:
+                    rows = []
+                    st.error(f"Could not read the file: {e}")
+                if rows:
+                    prev = pd.DataFrame(rows)[["recorded_at", "reading_type", "value", "unit", "notes", "source_row"]]
+                    edited = st.data_editor(prev, hide_index=True, width="stretch", num_rows="dynamic", key="values_preview")
+                    if st.button(f"Add {len(edited)} readings", type="primary", key="values_add_btn"):
+                        try:
+                            approved = edited.to_dict("records")
+                            for r in approved:
+                                r["recorded_at"] = values_import._when(r.get("recorded_at"))
+                            n = values_import.add_readings(pid, u, approved, source=f"Import: {up.name}")
+                            st.success(f"Added {n} readings.")
+                            st.rerun()
+                        except Exception as e:
+                            _denied(e)
+                elif up is not None:
+                    st.warning("No readings recognised in that file. Check the column names.")
+        with tab_text:
+            st.caption("Type or paste notes such as: BP 140/90 pulse 72 on 1 Oct morning; sugar 150 fasting 2 Oct; weight 71 kg 3 Oct. They are read out for you to check before saving.")
+            text = st.text_area("Readings", key="values_text", height=120)
+            if st.button("Read these notes", key="values_text_btn", disabled=not text.strip()):
+                if provider is None:
+                    st.error("No model key configured. Use the spreadsheet import or manual entry.")
+                else:
+                    with st.spinner("Reading..."):
+                        try:
+                            out = documents.stage_text_readings(pid, u, text.strip(), provider)
+                            st.success(f"{out['items']} readings found. Check them above and confirm.")
+                            st.rerun()
+                        except Exception as e:
+                            _denied(e)
+        with tab_photo:
+            st.caption("A photo of a BP diary, glucose meter screen or logbook, or a weight chart. Readings are extracted for you to confirm.")
+            shot = st.file_uploader("Photo or PDF of the log", type=["pdf", "jpg", "jpeg", "png", "webp"], key="values_photo")
+            cam = st.camera_input("Or take the photo now", key="values_camera")
+            f = shot or cam
+            if f is not None and st.button("Read the log", key="values_photo_btn"):
+                name = getattr(f, "name", None) or f"readings-{datetime.now():%Y%m%d-%H%M%S}.jpg"
+                with st.spinner("Reading..."):
+                    try:
+                        out = documents.ingest_upload(pid, u, name, getattr(f, "type", None) or "application/octet-stream", f.getvalue(), provider, kind="vitals_log")
+                    except Exception as e:
+                        out = {"error": str(e)}
+                if out.get("error"):
+                    st.error(out["error"])
+                else:
+                    st.success(f"{out['items']} readings found. Check them above and confirm.")
+                    st.rerun()
+        with tab_manual, st.form("add_value", clear_on_submit=True):
             st.markdown("**Add a reading by hand**")
             c1, c2, c3, c4 = st.columns(4)
             rtype = c1.selectbox("Type", ["blood_pressure_systolic", "blood_pressure_diastolic", "heart_rate", "glucose", "weight",
@@ -724,18 +870,41 @@ def page_settings() -> None:
         return
     with t[1]:
         st.markdown("**Invite someone**")
-        c1, c2 = st.columns([1, 2])
-        role = c1.selectbox("Role", ["viewer", "editor", "admin"], key="invite_role")
-        if c1.button("Create invite code"):
-            inv = auth.create_invite(u, role)
-            st.session_state.last_invite = inv["code"]
-        if st.session_state.get("last_invite"):
-            c2.code(st.session_state.last_invite)
-            c2.caption("Send this code. It works once and expires in 14 days.")
+        st.caption("Accounts are by invitation only. Each invite works once. Tie it to an email so nobody else can use it.")
+        with st.form("invite_form"):
+            c1, c2, c3 = st.columns([2, 1, 1])
+            inv_email = c1.text_input("Their email (recommended)")
+            inv_role = c2.selectbox("Role", ["viewer", "editor", "admin"], index=1)
+            inv_note = c3.text_input("Who is this for?", placeholder="e.g. Sister")
+            if st.form_submit_button("Create invite", type="primary"):
+                try:
+                    inv = auth.create_invite(u, inv_role, email=inv_email or None, note=inv_note or None)
+                    st.session_state.last_invite = inv
+                except Exception as e:
+                    _denied(e)
+        base_url = os.environ.get("APP_BASE_URL") or _guess_base_url()
+        last = st.session_state.get("last_invite")
+        if last:
+            link = auth.invite_link(base_url, last["code"])
+            msg = auth.invite_message(base_url, last)
+            st.success("Invite created. Send it one of these ways:")
+            st.code(link)
+            from urllib.parse import quote
+            w1, w2 = st.columns(2)
+            w1.link_button("Send on WhatsApp", f"https://wa.me/?text={quote(msg)}", width="stretch")
+            w2.link_button("Send by email", f"mailto:{last.get('email') or ''}?subject={quote('Invite to ' + APP_TITLE)}&body={quote(msg)}", width="stretch")
+            st.caption(f"Or share the code {last['code']} by any other means.")
         invites = [i for i in auth.list_invites(u) if not i["used_at"]]
         if invites:
-            st.dataframe(pd.DataFrame([{"Code": i["code"], "Role": i["role"], "Expires": _fmt(i["expires_at"])} for i in invites]),
-                         hide_index=True, width="stretch")
+            st.markdown("**Open invites**")
+            for i in invites:
+                c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
+                c1.write(i.get("email") or "any email")
+                c2.write(f"{i['role']}" + (f", {i['note']}" if i.get("note") else ""))
+                c3.write(f"expires {_fmt(i['expires_at'])[:10]}")
+                if c4.button("Revoke", key=f"revoke_{i['id']}"):
+                    auth.revoke_invite(u, i["id"])
+                    st.rerun()
         st.markdown("**People**")
         for person in db.list_users():
             if not person.get("email"):
