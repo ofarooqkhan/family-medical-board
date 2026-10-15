@@ -55,7 +55,7 @@ LAB = {
 def test_render_pdf_pages_and_text():
     pages = extraction.render_pages(make_pdf(["Hello page one", "Second page"]), "application/pdf", "x.pdf")
     assert [p["page_number"] for p in pages] == [1, 2]
-    assert pages[0]["image_png"][:8] == b"\x89PNG\r\n\x1a\n"
+    assert pages[0]["image_png"][:3] == b"\xff\xd8\xff"  # JPEG, bounded size for the model gateway
     assert "Hello page one" in pages[0]["text"]
     assert pages[0]["width"] > 0 and pages[0]["height"] > 0
 
@@ -179,3 +179,88 @@ def test_strict_schemas_are_accepted_by_the_openai_converter():
         s = to_strict_json_schema(schema)
         assert s["additionalProperties"] is False
         assert set(s["required"]) == set(s["properties"])
+
+
+# Photo straightening, request batching, JPEG encoding
+
+def _text_page(angle=0.0, size=(900, 1200)):
+    """A page of horizontal dark text lines, optionally tilted."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", size, "white")
+    d = ImageDraw.Draw(img)
+    for y in range(120, size[1] - 120, 40):
+        d.rectangle([80, y, size[0] - 80, y + 12], fill=(20, 20, 20))
+    if angle:
+        img = img.rotate(angle, expand=True, fillcolor=(255, 255, 255))
+    return img
+
+
+def test_estimate_skew_finds_the_tilt_and_straighten_levels_it():
+    tilted = _text_page(angle=-4.0)
+    est = extraction.estimate_skew(tilted)
+    assert abs(est - 4.0) <= 1.0, est
+    level = extraction.straighten(tilted)
+    assert abs(extraction.estimate_skew(level)) <= 1.0
+    # A level page is left as is (no rotation, same size).
+    flat = _text_page()
+    assert extraction.straighten(flat).size == flat.size
+    # A blank image never raises and is not rotated.
+    from PIL import Image
+    blank = Image.new("RGB", (400, 300), "white")
+    assert extraction.straighten(blank).size == blank.size
+
+
+def test_photo_upload_is_straightened_and_jpeg_encoded():
+    buf = io.BytesIO()
+    _text_page(angle=5.0).save(buf, format="PNG")
+    pages = extraction.render_pages(buf.getvalue(), "image/png", "photo.png")
+    assert pages[0]["image_png"][:3] == b"\xff\xd8\xff"
+    assert max(pages[0]["width"], pages[0]["height"]) <= extraction.MAX_IMAGE_SIDE
+    from PIL import Image
+    back = Image.open(io.BytesIO(pages[0]["image_png"]))
+    assert abs(extraction.estimate_skew(back)) <= 1.0
+
+
+def test_extraction_batches_pages_under_the_request_budget(monkeypatch):
+    monkeypatch.setattr(extraction, "MAX_REQUEST_BYTES", 400_000)
+    big = b"\xff\xd8\xff" + b"0" * 150_000  # about 200 KB once base64 encoded
+    pages = [{"page_number": i + 1, "image_png": big, "width": 10, "height": 10, "text": None} for i in range(5)]
+    batches = extraction._batches(pages)
+    assert [[p["page_number"] for p in b] for b in batches] == [[1], [2], [3], [4], [5]]
+    seen = []
+
+    def respond(parts):
+        label = next(p.text for p in parts if p.text and p.text.startswith("Page "))
+        page = int(label.split()[1])
+        seen.append(page)
+        return {"prescriber": "Dr. A" if page == 1 else None, "clinic": None, "patient_name": None,
+                "document_date": "2026-09-01" if page == 1 else None, "diagnoses": [f"dx p{page}"], "notes": None,
+                "overall_confidence": 0.9 if page != 3 else 0.6,
+                "medications": [{"name": f"Med {page}", "generic_name": None, "dose": "1 mg", "route": None, "frequency": None,
+                                 "duration": None, "instructions": None, "page": page, "confidence": 0.9, "low_confidence_fields": []}]}
+
+    fake = FakeProvider(responses={PrescriptionDocument: respond})
+    doc, call = extraction.extract(fake, "gpt-4o", pages, "prescription")
+    assert seen == [1, 2, 3, 4, 5]
+    assert [m.name for m in doc.medications] == ["Med 1", "Med 2", "Med 3", "Med 4", "Med 5"]
+    assert [m.page for m in doc.medications] == [1, 2, 3, 4, 5]
+    assert doc.prescriber == "Dr. A" and doc.document_date == "2026-09-01" and doc.overall_confidence == 0.6
+    assert len(doc.diagnoses) == 5
+    assert call.input_tokens == 5 * fake.input_tokens and call.purpose == "extract:prescription"
+    # Each batch tells the model which pages it is looking at.
+    assert "batch 3 of 5" in fake.calls[2]["system"]
+
+
+def test_single_small_document_is_one_call():
+    pages = [{"page_number": 1, "image_png": b"\xff\xd8\xff" + b"0" * 1000, "width": 10, "height": 10, "text": "Rx"}]
+    fake = FakeProvider(responses={PrescriptionDocument: RX})
+    extraction.extract(fake, "gpt-4o", pages, "prescription")
+    assert len([c for c in fake.calls if c["purpose"] == "extract:prescription"]) == 1
+    assert "batch" not in fake.calls[-1]["system"]
+
+
+def test_provider_content_uses_jpeg_data_url_for_jpeg_bytes():
+    from providers import OpenAIProvider
+    content = OpenAIProvider._content([Part.of_png(b"\xff\xd8\xff\xe0abc"), Part.of_png(b"\x89PNG\r\n\x1a\nabc")])
+    assert content[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")

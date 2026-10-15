@@ -169,7 +169,8 @@ class OpenAIProvider:
                 out.append({"type": "text", "text": p.text})
             elif p.image_png is not None:
                 b64 = base64.b64encode(p.image_png).decode("ascii")
-                out.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "high"}})
+                mime = "image/jpeg" if p.image_png[:3] == b"\xff\xd8\xff" else "image/png"
+                out.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"}})
         return out
 
     def structured(self, *, model, system, parts, schema, purpose, max_tokens=4000, temperature=0.0):

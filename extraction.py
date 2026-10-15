@@ -20,7 +20,13 @@ from providers import ModelCall, Part, Provider
 
 MAX_PAGES = 12
 RENDER_DPI = 150
-MAX_IMAGE_SIDE = 2000
+MAX_IMAGE_SIDE = 1800
+JPEG_QUALITY = 85
+# The hosted model gateway rejects request bodies above a few megabytes
+# (HTTP 413 "Body buffer overflow"), so pages go to the model in batches
+# whose encoded size stays under this budget.
+MAX_REQUEST_BYTES = 5_500_000
+MAX_PAGES_PER_CALL = 4
 
 DocumentKind = Literal["prescription", "lab_report", "imaging_report", "discharge_summary", "vitals_log", "other"]
 
@@ -210,6 +216,7 @@ def _render_dicom(data: bytes) -> dict[str, Any]:
 
 def _render_pdf(data: bytes) -> list[dict[str, Any]]:
     import pymupdf
+    from PIL import Image
 
     pages = []
     with pymupdf.open(stream=data, filetype="pdf") as doc:
@@ -217,10 +224,13 @@ def _render_pdf(data: bytes) -> list[dict[str, Any]]:
             if i >= MAX_PAGES:
                 break
             pix = page.get_pixmap(dpi=RENDER_DPI)
-            png = pix.tobytes("png")
-            png, w, h = _shrink(png)
-            pages.append({"page_number": i + 1, "image_png": png, "width": w, "height": h,
-                          "text": (page.get_text() or "").strip() or None})
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples) if pix.n >= 3 else Image.frombytes("L", (pix.width, pix.height), pix.samples)
+            text = (page.get_text() or "").strip() or None
+            if not text:
+                # A scanned page is a photo in a PDF: straighten it too.
+                img = straighten(img)
+            data_bytes, w, h = encode_image(img)
+            pages.append({"page_number": i + 1, "image_png": data_bytes, "width": w, "height": h, "text": text})
     return pages
 
 
@@ -231,37 +241,122 @@ def _render_image(data: bytes) -> dict[str, Any]:
     img = ImageOps.exif_transpose(img)
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
-    img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
+    img = straighten(img)
+    data_bytes, w, h = encode_image(img)
+    return {"page_number": 1, "image_png": data_bytes, "width": w, "height": h, "text": None}
+
+
+def encode_image(img) -> tuple[bytes, int, int]:
+    """JPEG at a bounded size: readable for the model, small enough for the gateway."""
+    if max(img.size) > MAX_IMAGE_SIDE:
+        img = img.copy()
+        img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
     buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return {"page_number": 1, "image_png": buf.getvalue(), "width": img.width, "height": img.height, "text": None}
+    img.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+    return buf.getvalue(), img.width, img.height
 
 
-def _shrink(png: bytes) -> tuple[bytes, int, int]:
+def estimate_skew(img, max_angle: float = 12.0, step: float = 0.5) -> float:
+    """Angle in degrees by which the text lines are tilted (positive is
+    counter-clockwise). Projection profile method: the rotation that makes
+    the row sums of dark pixels most uneven is the one that lines the text up."""
+    import numpy as np
+    from PIL import ImageOps
+
+    g = ImageOps.grayscale(img)
+    g.thumbnail((700, 700))
+    g = ImageOps.autocontrast(g)
+    arr = np.asarray(g, dtype=np.float32)
+    dark = (arr < 128).astype(np.float32)
+    if dark.mean() < 0.002 or dark.mean() > 0.6:
+        return 0.0
+    base = Image_fromarray((dark * 255).astype("uint8"))
+    best_angle, best_score = 0.0, -1.0
+    angle = -max_angle
+    while angle <= max_angle + 1e-9:
+        rotated = base.rotate(angle, expand=False, fillcolor=0)
+        rows = np.asarray(rotated, dtype=np.float32).sum(axis=1)
+        score = float(rows.var())
+        if score > best_score:
+            best_angle, best_score = angle, score
+        angle += step
+    return best_angle
+
+
+def Image_fromarray(arr):
     from PIL import Image
 
-    img = Image.open(io.BytesIO(png))
-    if max(img.size) <= MAX_IMAGE_SIDE:
-        return png, img.width, img.height
-    img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue(), img.width, img.height
+    return Image.fromarray(arr)
+
+
+def straighten(img):
+    """Rotate a photographed page so its lines run level, then even out the
+    lighting. Pure Pillow and numpy; a page already level is left as is."""
+    from PIL import ImageOps
+
+    try:
+        angle = estimate_skew(img)
+    except Exception:
+        return img
+    out = img
+    if abs(angle) >= 0.5:
+        fill = (255, 255, 255) if out.mode == "RGB" else 255
+        out = out.rotate(angle, expand=True, fillcolor=fill, resample=3)
+    try:
+        out = ImageOps.autocontrast(out, cutoff=1)
+    except Exception:
+        pass
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Extraction
 # ---------------------------------------------------------------------------
 
-def _page_parts(pages: list[dict[str, Any]]) -> list[Part]:
+def _page_parts(pages: list[dict[str, Any]], total: int | None = None) -> list[Part]:
     parts: list[Part] = []
+    total = total or min(len(pages), MAX_PAGES)
     for p in pages[:MAX_PAGES]:
-        parts.append(Part.of_text(f"Page {p['page_number']} of {min(len(pages), MAX_PAGES)}:"))
+        parts.append(Part.of_text(f"Page {p['page_number']} of {total}:"))
         if p.get("image_png"):
             parts.append(Part.of_png(p["image_png"]))
         if p.get("text"):
             parts.append(Part.of_text(f"Embedded text of page {p['page_number']}:\n{p['text'][:6000]}"))
     return parts
+
+
+def _batches(pages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Split pages so each model call stays under the request budget."""
+    out: list[list[dict[str, Any]]] = []
+    cur: list[dict[str, Any]] = []
+    size = 0
+    for p in pages[:MAX_PAGES]:
+        cost = int(len(p.get("image_png") or b"") * 4 / 3) + len(p.get("text") or "") + 200
+        if cur and (size + cost > MAX_REQUEST_BYTES or len(cur) >= MAX_PAGES_PER_CALL):
+            out.append(cur)
+            cur, size = [], 0
+        cur.append(p)
+        size += cost
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _merge_documents(first: dict[str, Any], more: list[dict[str, Any]]) -> dict[str, Any]:
+    """Combine the per-batch results of one document: lists concatenate,
+    scalars keep the first non-empty value, confidence takes the lowest."""
+    merged = dict(first)
+    for d in more:
+        for k, v in d.items():
+            if isinstance(v, list):
+                merged[k] = list(merged.get(k) or []) + v
+            elif k == "overall_confidence":
+                merged[k] = min(merged.get(k) or 1.0, v or 1.0)
+            elif merged.get(k) in (None, "", []) and v not in (None, ""):
+                merged[k] = v
+    return merged
 
 
 def classify(provider: Provider, model: str, pages: list[dict[str, Any]]) -> tuple[DocumentClassification, ModelCall]:
@@ -283,8 +378,28 @@ def extract(provider: Provider, model: str, pages: list[dict[str, Any]], kind: s
         "other": "Capture the key facts and every medication mentioned by name.",
     }.get(kind, "Capture the key facts.")
     system = f"You extract data from one medical document for a family caregiver's record system. {focus} {TRANSCRIBE_RULES}"
-    return provider.structured(model=model, system=system, parts=_page_parts(pages), schema=schema,
-                               purpose=f"extract:{kind}", max_tokens=6000)
+    batches = _batches(pages)
+    total = min(len(pages), MAX_PAGES)
+    results: list[dict[str, Any]] = []
+    calls: list[ModelCall] = []
+    for i, batch in enumerate(batches):
+        sys_text = system
+        if len(batches) > 1:
+            sys_text += (f" This document has {total} pages and you are shown pages "
+                         f"{batch[0]['page_number']} to {batch[-1]['page_number']} (batch {i + 1} of {len(batches)}). "
+                         "Use the page numbers as labelled. Header fields may be on an earlier batch; return null if not visible.")
+        doc, call = provider.structured(model=model, system=sys_text, parts=_page_parts(batch, total), schema=schema,
+                                        purpose=f"extract:{kind}", max_tokens=6000)
+        results.append(doc.model_dump())
+        calls.append(call)
+    merged = schema.model_validate(_merge_documents(results[0], results[1:])) if len(results) > 1 else schema.model_validate(results[0])
+    if len(calls) > 1:
+        total_call = ModelCall(calls[0].provider, model, f"extract:{kind}",
+                               sum(c.input_tokens for c in calls), sum(c.output_tokens for c in calls),
+                               (round(sum(c.cost_usd for c in calls if c.cost_usd is not None), 6) if any(c.cost_usd is not None for c in calls) else None),
+                               sum(c.duration_ms for c in calls))
+        return merged, total_call
+    return merged, calls[0]
 
 
 class ExtractionResult(BaseModel):
