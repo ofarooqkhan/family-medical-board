@@ -46,14 +46,32 @@ def main() -> int:
         p(f"tts failed: {type(e).__name__}: {e}")
         audio = None
     if not audio:
-        p("no audio produced, cannot continue")
-        return 1
+        clip = os.environ.get("TRANSCRIBE_CHECK_AUDIO")
+        if clip and os.path.exists(clip):
+            with open(clip, "rb") as fh:
+                audio = fh.read()
+            p(f"using the clip at {clip}")
+        else:
+            # No speech available: a two second tone still shows whether the
+            # transcription endpoint is reachable (the text will be empty or noise).
+            import io
+            import math
+            import struct
+            import wave
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / 16000))) for i in range(32000)))
+            audio = buf.getvalue()
+            p("no speech available, sending a two second tone to test the endpoint only")
     p(f"audio bytes {len(audio)}")
 
     p("step: transcribe (models tried in order: "
       + ", ".join([DEFAULT_MODELS["transcription"], DEFAULT_MODELS["transcription_fallback"], "whisper-1"]) + ")")
     try:
-        transcript, call = provider.transcribe(data=audio, filename="livecheck.mp3", purpose="consultation_transcribe")
+        transcript, call = provider.transcribe(data=audio, filename="livecheck.wav" if audio[:4] == b"RIFF" else "livecheck.mp3", purpose="consultation_transcribe")
     except ProviderError as e:
         p(f"transcription failed: {e}")
         return 1
