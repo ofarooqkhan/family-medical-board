@@ -660,6 +660,17 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0f Published (2026-10-15, later)
+The owner republished after `c9b8d90`. Replit's schema sync created the
+new tables on production, the first page load ran the guarded
+migrations, and production is at 0007. The published site serves the
+new build (manifest route 200, login page with the new welcome line and
+three tabs, no error). Not yet done on the live site: a real doctor
+recording through Conversations (needs a human voice; the owner can do
+this first) and `tests/e2e/live_check.py` against production (creates
+and removes a temporary account and patient; run only with the owner's
+go).
+
 ### 8.0e Republish and Replit's schema sync (2026-10-15)
 Replit validates a republish by diffing the development schema against
 production and applying its own SQL to production before the new build
