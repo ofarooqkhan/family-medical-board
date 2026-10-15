@@ -59,7 +59,7 @@ code, pre, kbd { font-family: "Source Code Pro", ui-monospace, monospace !import
 }
 [data-testid="stMetricLabel"] { color: var(--fmb-muted); }
 [data-testid="stMetricLabel"] div, [data-testid="stMetricLabel"] p { white-space: normal; overflow: visible; text-overflow: clip; }
-[data-testid="stMetricValue"] { color: var(--fmb-accent); }
+[data-testid="stMetricValue"] { color: var(--fmb-accent); font-size: 2rem; font-weight: 700; }
 
 /* Tabs as gentle pills */
 [data-testid="stTabs"] [role="tablist"] {

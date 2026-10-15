@@ -32,8 +32,6 @@ font = "Nunito:https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700&
 headingFont = "Nunito"
 headingFontSizes = ["1.85rem", "1.4rem", "1.2rem", "1.05rem", "1rem", "0.95rem"]
 headingFontWeights = [700, 700, 700, 600, 600, 600]
-metricValueFontSize = "2rem"
-metricValueFontWeight = 700
 chartCategoricalColors = ["#2F6B66", "#C47A52", "#7A8B5C", "#9B6B9E", "#5B7FA6", "#B8884A"]
 
 [theme.sidebar]
