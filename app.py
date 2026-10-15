@@ -339,7 +339,7 @@ def page_home() -> None:
     due = appts.due_reminders(u)
     if due:
         for a in due:
-            st.warning(f"Coming up: {a['patient_name']}, {a['title']} on {_when(a["starts_at"])}"
+            st.warning(f"Coming up: {a['patient_name']}, {a['title']} on {_when(a['starts_at'])}"
                        + (f" with {a['doctor_name']}" if a.get("doctor_name") else ""))
     pid = _need_patient()
     if not pid:
@@ -1242,7 +1242,7 @@ def page_brief() -> None:
         return
     st.title("Pre-visit brief")
     rows = appts.list_appointments(pid, u, upcoming_only=True)
-    opts = {0: "General (all open questions)"} | {a["id"]: f"{_when(a["starts_at"])} {a['title']}" for a in rows}
+    opts = {0: "General (all open questions)"} | {a["id"]: f"{_when(a['starts_at'])} {a['title']}" for a in rows}
     chosen = st.selectbox("For which appointment?", list(opts), format_func=lambda i: opts[i])
     lang = st.radio("Language", list(LANGS), format_func=lambda k: LANGS[k], horizontal=True,
                     index=list(LANGS).index(u.get("language") or "en"))
