@@ -607,10 +607,15 @@ Credentials and ids:
 Published at https://medical-board-history.replit.app (Autoscale, replId
 `0910c133-b692-4c80-b4d8-39d37884f87b`). The live database migrated to
 revision 0003 with the five existing patients kept; duplicate dev-login
-emails were cleared by the fixed revision. The Replit workspace carries two
-small edits applied by Replit Agent that match commits `484e1ac` and
-`13eb362` on main; keep the workspace and main in step by pulling main in
-the Repl before the next publish. Creating new Repls needs a subscription
+emails were cleared by the fixed revision. The workspace was synced to main at
+`2220bc6` by Replit Agent (it needed Plan mode off in the Repl to apply
+changes). The real OpenAI path was verified there: `classify()` on a
+generated prescription PDF returned kind prescription, date 2026-09-01,
+1419 input and 42 output tokens on gpt-4o through the Replit integration.
+Two production bugs found on Replit and fixed on main: structured outputs
+on the 1.x OpenAI SDK (`13eb362`) and stale pooled connections dropped by
+the hosted Postgres (`2220bc6`, ping plus keepalives). Keep the workspace
+and main in step by pulling main in the Repl before each publish. Creating new Repls needs a subscription
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
