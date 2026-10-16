@@ -662,6 +662,11 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0s Rounds 11 and 12 live (2026-10-16)
+The owner republished. Deployment running; production database at 0009
+with doctor_memory.event_date. Live site carries everything through
+`b1c74b5` (memory by document date, board as a meeting).
+
 ### 8.0r Rounds 11 and 12 synced, awaiting the owner's Republish (2026-10-15)
 Two sessions push to main: this one (rounds 1 to 11) and
 `claude/gifted-volta-g7i908` (round 12, the board as a meeting). Merged
