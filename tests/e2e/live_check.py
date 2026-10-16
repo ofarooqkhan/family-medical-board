@@ -133,16 +133,45 @@ def main() -> int:
         for v in db.get_latest_vitals(pid, user):
             print(f"  {v['reading_type']}: {v['value']} {v['unit'] or ''} ref {v.get('reference_range')} {v.get('flag')} (doc {v['source_file_id']} p{v['source_page']})")
 
-        step("board: record question")
-        run = board.run_board(pid, user, "Summarize what the latest prescription and lab report show and what to ask Dr. Khan at the review.", provider)
-        print(f"status {run['status']} agents {run['routed_agents']} tokens {run['input_tokens']}/{run['output_tokens']} cost {run['estimated_cost_usd']}")
-        print(board.format_markdown(run)[:1500])
-
-        step("board: advice-seeking question must be declined")
-        run2 = board.run_board(pid, user, "Should we increase his metformin dose since the HbA1c is high?", provider)
-        co = run2["coordinator_output"]
-        print(f"declined: {co['declined_advice_request']} note: {co.get('decline_note')}")
-        assert co["declined_advice_request"], "advice question was not declined"
+        step("board: a conversation of four turns")
+        conv = db.create_conversation(user, pid, "Live check")
+        turns = [
+            ("specific question", "How have his kidney function and potassium changed, and what should we ask Dr. Khan about them?"),
+            ("follow-up that only makes sense in context", "And the sugar control?"),
+            ("record lookup the chair should answer alone", "Which documents are on file?"),
+            ("advice question that must be declined", "Should we increase his metformin dose since the HbA1c is high?"),
+        ]
+        runs = []
+        for label, q in turns:
+            print(f"\n-- {label}: {q}")
+            db.save_chat_message(pid, conv, user, "user", q)
+            r = board.run_board(pid, user, q, provider, conversation_id=conv)
+            md = board.format_markdown(r)
+            db.save_chat_message(pid, conv, user, "assistant", md, responding_doctor="coordinator")
+            runs.append(r)
+            print(f"status {r['status']} turn {r['turn']} direct {r['direct']} agents {r['routed_agents']} "
+                  f"tokens {r['input_tokens']}/{r['output_tokens']} cost {r['estimated_cost_usd']} ms {r['duration_ms']}")
+            print(f"triage: {r['routing_reason']}")
+            for a in r["assignments"]:
+                print(f"  asked {a['agent_type']}: {a['question']}")
+            for o in r["specialist_outputs"]:
+                for d in o.get("discussion") or []:
+                    print(f"  {o['agent_type']} {d['stance']} {d['to']}: {d['text'][:160]}")
+                for qd in o.get("questions_for_doctor") or []:
+                    print(f"  {o['agent_type']} asks {qd['for_doctor']}: {qd['question'][:160]} | rests on: {(qd.get('based_on') or '')[:120]}")
+            if r["errors"]:
+                print(f"errors: {r['errors']}")
+            print(md[:1800])
+        first, follow, lookup, advice = runs
+        assert first["turn"] == 0 and follow["turn"] == 1, "conversation turns not counted"
+        assert "Missing records" not in board.format_markdown(follow), "follow-up carried the first-reply sections"
+        assert advice["coordinator_output"]["declined_advice_request"], "advice question was not declined"
+        items = board.previous_open_items(pid, user)
+        print(f"\nopen items after the conversation ({len(items)}):")
+        for i in items:
+            print(f"  [{i['doctor']}] {i['text']} (since run {i.get('since_run_id')})")
+        total = sum(r["estimated_cost_usd"] or 0 for r in runs)
+        print(f"conversation cost ${total:.4f}")
 
         step("brief")
         b = brief_mod.build_brief(pid, user)

@@ -338,6 +338,12 @@ def test_conversation_continues_and_plan_state_carries_between_runs(accounts):
     assert [(i["text"], i["status"], i["since_run_id"]) for i in items] == [("Is the rise in systolic pressure expected?", "open", first["id"])]
     assert board.previous_open_items(pid, user) == items
 
+    # A chair that re-lists the item without its origin does not make it look new.
+    relisted = {**COORD, "open_items": [{"text": "Is the rise in systolic pressure expected?", "doctor": "Cardiologist",
+                                         "status": "open", "since_run_id": None}]}
+    again = board.run_board(pid, user, "Anything else on blood pressure?", _fake({CoordinatorOutput: relisted}), conversation_id=conv)
+    assert [i["since_run_id"] for i in again["coordinator_output"]["open_items"]] == [first["id"]]
+
     # A chair that marks the item answered closes it, and the next run no longer carries it.
     closed = {**COORD, "questions_by_doctor": [{"doctor": "Nephrologist", "questions": ["Is the eGFR trend expected?"]}],
               "open_items": [{"text": "Is the rise in systolic pressure expected?", "doctor": "Cardiologist", "status": "answered",

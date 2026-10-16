@@ -626,6 +626,10 @@ def _carry_items(co: CoordinatorOutput, previous: list[dict], run_id: int) -> No
     """Make the plan state complete: previous items the chair did not mention
     stay open; new items get this run's id."""
     items = list(co.open_items or [])
+    origin = {(p.get("text") or "").strip().lower(): p.get("since_run_id") for p in previous}
+    for i in items:  # an item the chair carried over keeps the run it was first raised in
+        if origin.get(i.text.strip().lower()):
+            i.since_run_id = origin[i.text.strip().lower()]
     seen = {i.text.strip().lower() for i in items}
     for p in previous:
         key = (p.get("text") or "").strip().lower()
