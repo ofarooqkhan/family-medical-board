@@ -474,13 +474,17 @@ TRIAGE_SYSTEM = (
     "single precise question to answer from its records. Read the conversation so far: a follow-up such as 'and the "
     "kidneys?' continues the earlier turns. When the family asks for a full or overall review, convene every specialist "
     "whose domain has records on file.\n"
+    "- An assignment covers every part of the family's question that falls in that specialist's domain; if they ask about "
+    "two things, the question names both.\n"
+    "- An assignment always asks what the records show (values, trends, changes, gaps, what is still open). It never asks "
+    "what should be done, recommended, adjusted, started or stopped, even when the family's question does.\n"
     "- Use only agent_type values from the list. Give the reason in one sentence."
 )
 
 
 def triage(provider: Provider, query: str, index: str, agents: list[dict], history: list[dict] | None = None,
-           open_items: list[dict] | None = None, model: str | None = None, force_all: bool = False
-           ) -> tuple[list[dict], str, ModelCall | None, str | None]:
+           open_items: list[dict] | None = None, model: str | None = None, force_all: bool = False,
+           advice_flagged: bool = False) -> tuple[list[dict], str, ModelCall | None, str | None]:
     """Returns (assignments, reason, call, direct_answer). Each assignment is
     {agent_type, question}."""
     specialists = [a for a in agents if a["agent_type"] != "coordinator"]
@@ -490,8 +494,10 @@ def triage(provider: Provider, query: str, index: str, agents: list[dict], histo
         return [{"agent_type": n, "question": q} for n in names[:MAX_SPECIALISTS]], "full review requested", None, None
     model = model or DEFAULT_MODELS["router"]
     menu = "\n".join(f"- {a['agent_type']}: {a['display_name']}; domains: {', '.join(a.get('domains') or [])}" for a in specialists)
+    note = ("\n\nNOTE: the family's question asks for advice. The board will decline that part. Assign only questions about "
+            "what the records show on the topic.") if advice_flagged else ""
     user_text = (f"SPECIALISTS AVAILABLE:\n{menu}\n\n{_history_text(history or [])}\n\n{_items_text(open_items or [])}\n\n"
-                 f"RECORD INDEX:\n{index[:6000]}\n\nFAMILY'S QUESTION: {query}")
+                 f"RECORD INDEX:\n{index[:6000]}\n\nFAMILY'S QUESTION: {query}{note}")
     try:
         decision, call = provider.structured(model=model, system=TRIAGE_SYSTEM.format(max_n=MAX_SPECIALISTS),
                                              parts=[Part.of_text(user_text)], schema=TriageDecision, purpose="triage", max_tokens=600)
@@ -561,7 +567,9 @@ def run_discussion(provider: Provider, agent: dict, query: str, own: SpecialistF
                "domain, reply: agree, disagree (say why, from the records) or add (what they missed; put it in "
                "added_observations with its source). Then write your questions for the treating doctor: only a question that "
                "rests on a named finding (put it in based_on) and bears on the family's question. Do not repeat an item that is "
-               "already open from the last review. An empty list is the right answer when the records are clear. Never advise.")
+               "already open from the last review, in any wording: if it asks the same thing, leave it out. A request for a record "
+               "(an earlier report, a previous value) is a missing record, not a question for the doctor. An empty list is the "
+               "right answer when the records are clear. Never advise.")
     if advice_flagged:
         system += "\nThe family's question asks for advice; do not answer it. Questions for the doctor may cover the topic."
     peer_text = json.dumps([_findings_for_peers(p) for p in peers], ensure_ascii=False) if peers else "No other specialist took part."
@@ -604,7 +612,9 @@ def run_coordinator(provider: Provider, agent: dict | None, query: str, outputs:
                "with the family. Answer their question first, in the headline, in plain words. Then: what changed; what the "
                "records show, keeping every source reference; where the specialists disagreed and why, from their discussion "
                "stances. Keep a question only when it rests on a named finding and bears on the family's question; merge "
-               "duplicates and group them by the doctor who should hear them. Plan state: in open_items list every item from "
+               "duplicates and group them by the doctor who should hear them. A new question that asks the same thing as an "
+               "open item from the last review, in any wording, is not new: keep the open item and drop the new one. A request "
+               "for a record goes to missing_records, not to the questions. Plan state: in open_items list every item from "
                "the last review with its new status (answered when this review's findings answer it, superseded when a kept "
                "question replaces it, otherwise open, keeping its since_run_id), then add each kept question as a new open item "
                "with status open and since_run_id null.")
@@ -690,6 +700,7 @@ def run_board(patient_id: int, user: dict, query: str, provider: Provider, langu
 
     # 1. Triage
     assignments, reason, call, direct = triage(provider, query, index, agents, history=history, open_items=previous,
+                                               advice_flagged=advice_flagged,
                                                force_all=force_all)
     if call:
         calls.append(call)

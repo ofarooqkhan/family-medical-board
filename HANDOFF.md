@@ -662,6 +662,24 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0s Round 12 live; first real-model board conversation (2026-10-17)
+The owner republished; deployment success. `tests/e2e/live_check.py` now
+runs the board as a four-turn conversation; run in the Repl on gpt-4o
+against the development database: ALL STEPS OK in 36s, $0.064 for the
+four turns. Kidney question went to the nephrologist alone ($0.018);
+"And the sugar control?" went to the endocrinologist from context; "Which
+documents are on file?" was answered by the chair alone ($0.0003); the
+advice question was declined. Found and fixed in the prompts after the
+run: the chair dropped potassium from a two-part question; on the advice
+turn it passed the advice on to the specialist ("what adjustments are
+recommended for his metformin"), now it is told the question asks for
+advice and assigns record questions only; two rewordings of the same
+diabetes question both stayed open, and "provide previous creatinine
+levels" was listed as a doctor question, now the discussion and synthesis
+prompts drop rewordings of open items and send record requests to
+missing records. Open items that the chair re-lists keep their original
+run id (code, not prompt).
+
 ### 8.0r Rounds 11 and 12 synced, awaiting the owner's Republish (2026-10-15)
 Two sessions push to main: this one (rounds 1 to 11) and
 `claude/gifted-volta-g7i908` (round 12, the board as a meeting). Merged

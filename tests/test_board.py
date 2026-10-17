@@ -274,6 +274,9 @@ def test_run_board_declines_advice_and_still_summarizes(accounts):
     assert md.startswith("> This board does not give medical advice")
     # The specialist saw the advice instruction.
     assert any("asks for advice" in c["system"] for c in fake.calls if c["purpose"].startswith("specialist"))
+    # The chair was told too, so it assigns record questions instead of passing the advice question on.
+    triage_text = next(c for c in fake.calls if c["purpose"] == "triage")["parts"][0].text
+    assert "asks for advice" in triage_text and "never asks" in next(c for c in fake.calls if c["purpose"] == "triage")["system"]
 
 
 @pytestmark_db
