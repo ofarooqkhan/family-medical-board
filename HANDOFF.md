@@ -662,6 +662,36 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
+### 8.0t Round 13: findings from the first real-model board conversation (2026-10-17)
+`tests/e2e/live_check.py` on the Repl (development database, Replit
+OpenAI gateway, temporary account and patient removed afterwards):
+extraction auto-added all ten items with page links; the board held a
+four-turn conversation for $0.064; the record lookup was answered by the
+chair alone; the advice question was declined. Problems found and fixed:
+1. A specialist reported potassium 4.5 (range 3.5 to 5.0); the record
+   says 4.6 (3.5 to 5.1). `board.ground_findings` and
+   `ground_coordinator` now drop any observation, change line or headline
+   that states a number appearing nowhere in the record (dates, years
+   and whole numbers up to 12 are not checked), before the family or the
+   memory consolidation sees it. Removed statements are kept in
+   `routed_agents.dropped_unverified` and listed in the run details.
+2. Record questions carried the advice banner because a specialist or the
+   chair declined on its own. The banner now follows only the tested
+   advice patterns on the question (`detect_advice_request`); output text
+   is still scrubbed of advice sentences.
+3. The chair passed the advice request on to the specialist ("what
+   adjustments are recommended"). Triage is now told to reword such a
+   request into what the records show and what to ask.
+4. "What changed" restated single readings. The coordinator is told a
+   reading with nothing to compare is not a change.
+5. Follow-up replies repeated every earlier question. They now show only
+   this turn's new questions and a line saying how many earlier ones are
+   still open. The coordinator calls the patient by first name.
+6. Medicine names came back as "Tab Metformin 500 mg" with the dose also
+   in the dose field. `extraction.clean_medicine` strips the form prefix
+   and a strength already in the dose, keeps the original as `as_written`
+   and the form as `form`. Existing medication rows keep their old names.
+
 ### 8.0s Rounds 11 and 12 live (2026-10-16)
 The owner republished. Deployment running; production database at 0009
 with doctor_memory.event_date. Live site carries everything through

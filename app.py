@@ -1189,6 +1189,11 @@ def _run_detail(run: dict | None) -> None:
     st.caption(f"Chair's triage: {agents}. {routed.get('reason') or ''}")
     if run.get("error"):
         st.warning(run["error"])
+    if routed.get("dropped_unverified"):
+        with st.expander(f"Removed {len(routed['dropped_unverified'])} statement(s) whose numbers are not in the records"):
+            st.caption("A model wrote a value that does not appear in any document or reading on file, so it was left out of the answer and of memory.")
+            for d in routed["dropped_unverified"]:
+                st.markdown(f"- {d}")
     for o in _j(run.get("specialist_outputs")) or []:
         with st.container(border=True):
             st.markdown(f"**{o.get('agent_type', '').replace('_', ' ').title()}** (confidence {o.get('confidence', 0):.0%})")
