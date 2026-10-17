@@ -302,6 +302,74 @@ def record_index(rec: Record) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
+_NUM_RE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?![\w.]*\d)")
+
+
+def _numbers(text: str) -> set[float]:
+    """Numbers a statement asserts: values and ranges. Dates, years and small
+    whole numbers (counts, months, tablets) are not checked."""
+    out: set[float] = set()
+    for tok in _NUM_RE.findall(_DATE_RE.sub(" ", text or "")):
+        try:
+            v = float(tok)
+        except ValueError:
+            continue
+        if "." not in tok and (v <= 12 or 1900 <= v <= 2100):
+            continue
+        out.add(round(v, 3))
+    return out
+
+
+def record_text(rec: "Record") -> str:
+    return record_index(rec) + "\n" + "\n".join(d["text"] for d in rec.docs)
+
+
+def ungrounded(text: str, known: set[float]) -> list[float]:
+    """Numbers in a statement that appear nowhere in the record."""
+    return sorted(n for n in _numbers(text) if n not in known)
+
+
+def ground_findings(f: "SpecialistFindings", known: set[float]) -> list[str]:
+    """Drop observations that state a number the record does not contain, so a
+    misread value never reaches the family or the memory. Returns what was dropped."""
+    dropped = []
+    keep = []
+    for o in f.observations:
+        bad = ungrounded(o.text, known)
+        if bad:
+            dropped.append(f"{f.agent_type}: {o.text} (not in record: {', '.join(str(b) for b in bad)})")
+        else:
+            keep.append(o)
+    f.observations = keep
+    if ungrounded(f.summary, known):
+        dropped.append(f"{f.agent_type} summary: {f.summary}")
+        f.summary = " ".join(o.text for o in keep[:2]) or "See the observations below."
+    return dropped
+
+
+def ground_coordinator(co: "CoordinatorOutput", known: set[float]) -> list[str]:
+    dropped = []
+    kept_obs = []
+    for o in co.key_observations:
+        if ungrounded(o.text, known):
+            dropped.append(f"coordinator: {o.text}")
+        else:
+            kept_obs.append(o)
+    co.key_observations = kept_obs
+    kept_changes = []
+    for c in co.what_changed:
+        if ungrounded(c, known):
+            dropped.append(f"coordinator what changed: {c}")
+        else:
+            kept_changes.append(c)
+    co.what_changed = kept_changes
+    if ungrounded(co.headline, known):
+        dropped.append(f"coordinator headline: {co.headline}")
+        co.headline = kept_obs[0].text if kept_obs else "Here is what the records show."
+    return dropped
+
+
 def _doc_entry(d: dict) -> str:
     return f"--- doc {d['id']} ({d['kind']}, {d['date'] or 'no date'}) ---\n{d['text']}"
 
@@ -476,8 +544,9 @@ TRIAGE_SYSTEM = (
     "whose domain has records on file.\n"
     "- An assignment covers every part of the family's question that falls in that specialist's domain; if they ask about "
     "two things, the question names both.\n"
-    "- An assignment always asks what the records show (values, trends, changes, gaps, what is still open). It never asks "
-    "what should be done, recommended, adjusted, started or stopped, even when the family's question does.\n"
+    "- Each specialist's question asks what the records show. Never pass on a request for a recommendation, a dose, a "
+    "change of treatment or what the family should do: reword it into what the records show on that topic and what the "
+    "treating doctor should be asked.\n"
     "- Use only agent_type values from the list. Give the reason in one sentence."
 )
 
@@ -603,7 +672,7 @@ def merge_specialist(findings: SpecialistFindings, turn: DiscussionTurn | None, 
 
 def run_coordinator(provider: Provider, agent: dict | None, query: str, outputs: list[SpecialistOutput], language: str,
                     advice_flagged: bool, history: list[dict] | None = None, open_items: list[dict] | None = None,
-                    model: str | None = None) -> tuple[CoordinatorOutput, ModelCall]:
+                    model: str | None = None, patient_first_name: str | None = None) -> tuple[CoordinatorOutput, ModelCall]:
     model = model or (agent or {}).get("model") or DEFAULT_MODELS["coordinator"]
     system = (agent or {}).get("system_prompt") or (
         "You are the care coordinator. Merge the specialists' structured outputs into one brief for the family. "
@@ -617,9 +686,16 @@ def run_coordinator(provider: Provider, agent: dict | None, query: str, outputs:
                "for a record goes to missing_records, not to the questions. Plan state: in open_items list every item from "
                "the last review with its new status (answered when this review's findings answer it, superseded when a kept "
                "question replaces it, otherwise open, keeping its since_run_id), then add each kept question as a new open item "
-               "with status open and since_run_id null.")
+               "with status open and since_run_id null. what_changed lists only differences: a value against an earlier "
+               "value of the same test, a medication started, stopped or changed, or something new since the earlier turns of "
+               "this conversation. A single reading with nothing to compare is not a change; leave what_changed empty rather "
+               "than restate values. Quote every number exactly as it appears in the specialists' findings.")
+    if patient_first_name:
+        system += f"\nRefer to the patient as {patient_first_name}, never as 'the patient'."
     if advice_flagged:
         system += "\nThe family asked for advice. Set declined_advice_request true and decline_note to a one-sentence redirect."
+    else:
+        system += "\nThe family's question is a question about the records. Set declined_advice_request false and decline_note null."
     payload = json.dumps([o.model_dump() for o in outputs], ensure_ascii=False)
     user_text = (f"FAMILY'S QUESTION: {query or 'full review'}\n\n{_history_text(history or [])}\n\n{_items_text(open_items or [])}\n\n"
                  f"SPECIALISTS' FINDINGS AND DISCUSSION (JSON):\n{payload}")
@@ -697,6 +773,9 @@ def run_board(patient_id: int, user: dict, query: str, provider: Provider, langu
     previous = previous_open_items(patient_id, user)
     record = load_record(patient_id, user)
     index = record_index(record)
+    known = _numbers(record_text(record))
+    dropped: list[str] = []
+    patient_first = ((record.header[0].split(":", 1)[1].strip() if record.header else "") or "").split(" ")[0] or None
 
     # 1. Triage
     assignments, reason, call, direct = triage(provider, query, index, agents, history=history, open_items=previous,
@@ -723,6 +802,7 @@ def run_board(patient_id: int, user: dict, query: str, provider: Provider, langu
             notes = ""
         try:
             f, c = run_findings(provider, agent, a["question"], query, ctx, language, advice_flagged, notes=notes)
+            dropped += ground_findings(f, known)
             findings[a["agent_type"]] = f
             calls.append(c)
         except ProviderError as e:
@@ -753,8 +833,9 @@ def run_board(patient_id: int, user: dict, query: str, provider: Provider, langu
     elif outputs:
         try:
             coordinator, c = run_coordinator(provider, by_type.get("coordinator"), query, outputs, language, advice_flagged,
-                                             history=history, open_items=previous)
+                                             history=history, open_items=previous, patient_first_name=patient_first)
             calls.append(c)
+            dropped += ground_coordinator(coordinator, known)
         except ProviderError as e:
             errors.append(f"coordinator: {e}")
     if coordinator is None:
@@ -762,11 +843,14 @@ def run_board(patient_id: int, user: dict, query: str, provider: Provider, langu
             headline="The board could not complete this review." if errors else "No specialist produced output.",
             what_changed=[], key_observations=[], questions_by_doctor=[], missing_records=[], disagreements=[],
             declined_advice_request=advice_flagged, decline_note=REDIRECT if advice_flagged else None, open_items=[])
-    if advice_flagged or any(o.declined_advice_request for o in outputs):
+    # The redirect banner follows the question itself (the tested advice patterns), not
+    # a model's own caution: a record question must not be answered with a refusal.
+    if advice_flagged:
         coordinator.declined_advice_request = True
-        coordinator.decline_note = coordinator.decline_note or REDIRECT
-        if REDIRECT.split(".")[0].lower() not in (coordinator.decline_note or "").lower():
-            coordinator.decline_note = f"{REDIRECT} {coordinator.decline_note or ''}".strip()
+        coordinator.decline_note = REDIRECT
+    else:
+        coordinator.declined_advice_request = False
+        coordinator.decline_note = None
 
     input_tokens = sum(c.input_tokens for c in calls)
     output_tokens = sum(c.output_tokens for c in calls)
@@ -775,7 +859,8 @@ def run_board(patient_id: int, user: dict, query: str, provider: Provider, langu
     status = "done" if not errors else ("partial" if outputs else "failed")
     duration_ms = int((time.time() - t0) * 1000)
     routing = {"agents": chosen, "reason": reason, "advice_patterns": advice_hits, "pharmacist_flags": flags,
-               "assignments": assignments, "turn": turn, "direct": bool(direct), "previous_open_items": len(previous)}
+               "assignments": assignments, "turn": turn, "direct": bool(direct), "previous_open_items": len(previous),
+               "dropped_unverified": dropped}
 
     with db.db_cursor(commit=True) as cur:
         cur.execute("""
@@ -858,11 +943,25 @@ def format_markdown(run: dict[str, Any], first_turn: bool | None = None) -> str:
         for o in co["key_observations"]:
             refs = ", ".join(s.get("label", "") for s in o.get("sources", []) if s.get("label"))
             lines.append(f"- {o['text']}" + (f" _({refs})_" if refs else ""))
-    if co.get("questions_by_doctor"):
+    groups = co.get("questions_by_doctor") or []
+    earlier = 0
+    if not first_turn and run.get("id"):
+        older = {(i.get("text") or "").strip().lower() for i in co.get("open_items") or []
+                 if i.get("since_run_id") and i.get("since_run_id") != run.get("id")}
+        filtered = []
+        for g in groups:
+            qs = [x for x in g.get("questions", []) if x.strip().lower() not in older]
+            earlier += len(g.get("questions", [])) - len(qs)
+            if qs:
+                filtered.append({"doctor": g["doctor"], "questions": qs})
+        groups = filtered
+    if groups:
         lines.append("\n**Questions to ask**")
-        for q in co["questions_by_doctor"]:
+        for q in groups:
             lines.append(f"- **{q['doctor']}**")
             lines += [f"  - {x}" for x in q["questions"]]
+    if earlier:
+        lines.append(f"\n_{earlier} earlier question{'s are' if earlier != 1 else ' is'} still open; the pre-visit brief lists them all._")
     if co.get("disagreements"):
         lines.append("\n**Where specialists differ**")
         lines += [f"- {s}" for s in co["disagreements"]]

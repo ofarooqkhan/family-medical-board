@@ -662,23 +662,51 @@ and main in step by pulling main in the Repl before each publish. Creating new R
 the account lacks; updating this one works, slowly, through Replit Agent.
 The connector's publish_app republishes after changes.
 
-### 8.0s Round 12 live; first real-model board conversation (2026-10-17)
-The owner republished; deployment success. `tests/e2e/live_check.py` now
-runs the board as a four-turn conversation; run in the Repl on gpt-4o
-against the development database: ALL STEPS OK in 36s, $0.064 for the
-four turns. Kidney question went to the nephrologist alone ($0.018);
-"And the sugar control?" went to the endocrinologist from context; "Which
-documents are on file?" was answered by the chair alone ($0.0003); the
-advice question was declined. Found and fixed in the prompts after the
-run: the chair dropped potassium from a two-part question; on the advice
-turn it passed the advice on to the specialist ("what adjustments are
-recommended for his metformin"), now it is told the question asks for
-advice and assigns record questions only; two rewordings of the same
-diabetes question both stayed open, and "provide previous creatinine
-levels" was listed as a doctor question, now the discussion and synthesis
-prompts drop rewordings of open items and send record requests to
-missing records. Open items that the chair re-lists keep their original
-run id (code, not prompt).
+### 8.0u Round 13 follow-up: rest of the live-run findings (2026-10-17)
+Two faults from the same live conversation that 8.0t left open, fixed in
+the prompts: the chair dropped potassium from "kidney function and
+potassium" (triage now covers every part of the question in the
+specialist's domain), and two rewordings of the same diabetes question
+both stayed open while "provide previous creatinine levels" was listed
+as a doctor question (discussion and synthesis now drop rewordings of an
+open item and send record requests to missing records). Triage is also
+told explicitly when the question matched the advice patterns. Open
+items the chair re-lists keep their original run id (code).
+
+### 8.0t Round 13: findings from the first real-model board conversation (2026-10-17)
+`tests/e2e/live_check.py` on the Repl (development database, Replit
+OpenAI gateway, temporary account and patient removed afterwards):
+extraction auto-added all ten items with page links; the board held a
+four-turn conversation for $0.064; the record lookup was answered by the
+chair alone; the advice question was declined. Problems found and fixed:
+1. A specialist reported potassium 4.5 (range 3.5 to 5.0); the record
+   says 4.6 (3.5 to 5.1). `board.ground_findings` and
+   `ground_coordinator` now drop any observation, change line or headline
+   that states a number appearing nowhere in the record (dates, years
+   and whole numbers up to 12 are not checked), before the family or the
+   memory consolidation sees it. Removed statements are kept in
+   `routed_agents.dropped_unverified` and listed in the run details.
+2. Record questions carried the advice banner because a specialist or the
+   chair declined on its own. The banner now follows only the tested
+   advice patterns on the question (`detect_advice_request`); output text
+   is still scrubbed of advice sentences.
+3. The chair passed the advice request on to the specialist ("what
+   adjustments are recommended"). Triage is now told to reword such a
+   request into what the records show and what to ask.
+4. "What changed" restated single readings. The coordinator is told a
+   reading with nothing to compare is not a change.
+5. Follow-up replies repeated every earlier question. They now show only
+   this turn's new questions and a line saying how many earlier ones are
+   still open. The coordinator calls the patient by first name.
+6. Medicine names came back as "Tab Metformin 500 mg" with the dose also
+   in the dose field. `extraction.clean_medicine` strips the form prefix
+   and a strength already in the dose, keeps the original as `as_written`
+   and the form as `form`. Existing medication rows keep their old names.
+
+### 8.0s Rounds 11 and 12 live (2026-10-16)
+The owner republished. Deployment running; production database at 0009
+with doctor_memory.event_date. Live site carries everything through
+`b1c74b5` (memory by document date, board as a meeting).
 
 ### 8.0r Rounds 11 and 12 synced, awaiting the owner's Republish (2026-10-15)
 Two sessions push to main: this one (rounds 1 to 11) and

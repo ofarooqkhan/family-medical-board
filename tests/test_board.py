@@ -263,6 +263,9 @@ def test_run_board_declines_advice_and_still_summarizes(accounts):
     import database as db
     user = accounts["viewer"]
     pid = db.create_patient(accounts["editor"], "Parent One")
+    # Readings the coordinator's numbers can be checked against (132 then 150: a rise of 18).
+    db.save_vital_reading(pid, accounts["editor"], "blood_pressure_systolic", 132, "mmHg")
+    db.save_vital_reading(pid, accounts["editor"], "blood_pressure_systolic", 150, "mmHg")
     fake = _fake()
     run = board.run_board(pid, user, "Should we increase his blood pressure tablet?", fake)
     assert run["advice_flagged"] is True
@@ -276,7 +279,7 @@ def test_run_board_declines_advice_and_still_summarizes(accounts):
     assert any("asks for advice" in c["system"] for c in fake.calls if c["purpose"].startswith("specialist"))
     # The chair was told too, so it assigns record questions instead of passing the advice question on.
     triage_text = next(c for c in fake.calls if c["purpose"] == "triage")["parts"][0].text
-    assert "asks for advice" in triage_text and "never asks" in next(c for c in fake.calls if c["purpose"] == "triage")["system"]
+    assert "asks for advice" in triage_text and "covers every part" in next(c for c in fake.calls if c["purpose"] == "triage")["system"]
 
 
 @pytestmark_db
@@ -325,7 +328,10 @@ def test_conversation_continues_and_plan_state_carries_between_runs(accounts):
     second = board.run_board(pid, user, "And the kidneys?", fake, conversation_id=conv)
     assert second["turn"] == 1
     md = board.format_markdown(second)
-    assert "Missing records" not in md and "_Specialists:" not in md and "Questions to ask" in md
+    # A follow-up reads as chat: no first-reply sections, and a question already raised
+    # in the first turn is not repeated; the reply says it is still open.
+    assert "Missing records" not in md and "_Specialists:" not in md
+    assert "Questions to ask" not in md and "1 earlier question is still open" in md
     # The chair, the discussion and the synthesis all saw the earlier turns and the open item from the first run.
     assert second["routed_agents"] == ["nephrologist"]  # "the kidneys" was read against the earlier turn
     for purpose in ("triage", "discussion:nephrologist", "coordinator"):
@@ -406,3 +412,43 @@ def test_every_specialist_remembers_its_review_and_memories_are_editable(account
     assert n >= 1 and "coordinator" not in {m["doctor_type"] for m in db.list_doctor_memories(pid, viewer)}
     actions = [r["action"] for r in db.get_audit_log(pid)]
     assert {"memory.update", "memory.delete", "memory.clear"} <= set(actions)
+
+
+
+def test_numbers_not_in_the_record_are_dropped_before_the_family_or_memory_sees_them():
+    known = board._numbers("lab_potassium: 4.6 mmol/L on 2026-09-05, ref 3.5 - 5.1; creatinine 1.3 ref 0.6 - 1.2; "
+                           "Metformin 500 mg; glucose 142.0 ref 70 - 100")
+    assert board.ungrounded("The potassium level is 4.5 mmol/L, within 3.5 - 5.0.", known) == [4.5, 5.0]
+    assert board.ungrounded("Potassium 4.6 mmol/L (3.5 - 5.1); glucose 142 mg/dL.", known) == []
+    assert board.ungrounded("Review in 3 months; HbA1c result dated 2026-09-05; 2 tablets.", known) == []
+    f = SpecialistFindings.model_validate({
+        "agent_type": "nephrologist", "summary": "Potassium 4.5, creatinine 1.3.",
+        "observations": [{"text": "Creatinine 1.3 mg/dL, above 0.6 - 1.2.", "category": "value", "sources": [], "confidence": 0.9},
+                         {"text": "Potassium 4.5 mmol/L within 3.5 - 5.0.", "category": "value", "sources": [], "confidence": 0.9}],
+        "missing_records": [], "cross_domain_flags": [], "declined_advice_request": False, "decline_note": None, "confidence": 0.9})
+    dropped = board.ground_findings(f, known)
+    assert [o.text for o in f.observations] == ["Creatinine 1.3 mg/dL, above 0.6 - 1.2."]
+    assert f.summary == "Creatinine 1.3 mg/dL, above 0.6 - 1.2." and len(dropped) == 2
+    co = CoordinatorOutput.model_validate(dict(COORD, headline="Potassium is 4.5.", what_changed=["Potassium 4.5, was 4.6."],
+                                                key_observations=[{"text": "Creatinine 1.3 mg/dL.", "category": "value", "sources": [], "confidence": 0.8}]))
+    board.ground_coordinator(co, known)
+    assert co.what_changed == [] and co.headline == "Creatinine 1.3 mg/dL."
+
+
+@pytestmark_db
+def test_record_question_never_carries_the_advice_banner(accounts):
+    """A specialist's own caution must not turn a record question into a refusal."""
+    import database as db
+    pid = db.create_patient(accounts["editor"], "Farooq Ahmad")
+    cautious = lambda parts: dict(_findings_response(parts), declined_advice_request=True, decline_note="I cannot advise.")
+    coord = dict(COORD, declined_advice_request=True, decline_note="Please consult the treating doctor.")
+    fake = _fake({SpecialistFindings: cautious, CoordinatorOutput: coord})
+    run = board.run_board(pid, accounts["viewer"], "How has his kidney function changed?", fake)
+    assert run["advice_flagged"] is False
+    co = run["coordinator_output"]
+    assert co["declined_advice_request"] is False and co["decline_note"] is None
+    assert board.REDIRECT not in board.format_markdown(run)
+    coord_call = next(c for c in fake.calls if c["purpose"] == "coordinator")
+    assert "Refer to the patient as Farooq" in coord_call["system"]
+    triage_call = next(c for c in fake.calls if c["purpose"] == "triage")
+    assert "Never pass on a request for a recommendation" in triage_call["system"]

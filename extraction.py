@@ -498,15 +498,43 @@ def slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")[:80]
 
 
+_FORM_PREFIX = re.compile(r"^\s*(tab|tabs|tablet|cap|caps|capsule|inj|injection|syp|syrup|susp|drops?|sachet|oint|cream)\.?\s+", re.I)
+_STRENGTH = re.compile(r"\s*\d+(?:\.\d+)?\s*(?:mg|mcg|µg|g|ml|iu|units?|%)(?:\s*/\s*\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml))?\s*$", re.I)
+_FORM_WORD = {"tab": "tablet", "tabs": "tablet", "tablet": "tablet", "cap": "capsule", "caps": "capsule", "capsule": "capsule",
+              "inj": "injection", "injection": "injection", "syp": "syrup", "syrup": "syrup", "susp": "suspension",
+              "drop": "drops", "drops": "drops", "sachet": "sachet", "oint": "ointment", "cream": "cream"}
+
+
+def clean_medicine(name: str | None, dose: str | None) -> tuple[str, str | None, str | None]:
+    """Split 'Tab Metformin 500 mg' into name 'Metformin', dose '500 mg' (when the
+    dose field is empty) and form 'tablet'. A strength already in the dose field
+    is removed from the name so the list does not read '500 mg 500 mg'."""
+    text = (name or "").strip()
+    form = None
+    m = _FORM_PREFIX.match(text)
+    if m:
+        form = _FORM_WORD.get(m.group(1).lower().rstrip("."))
+        text = text[m.end():].strip()
+    s = _STRENGTH.search(text)
+    if s and text[:s.start()].strip():
+        strength = s.group(0).strip()
+        text = text[:s.start()].strip()
+        if not dose:
+            dose = strength
+    return text or (name or "").strip(), dose, form
+
+
 def items_from_document(kind: str, doc: BaseModel) -> list[dict[str, Any]]:
     """Flatten a document into review items: {page_number, item_type, payload, confidence}."""
     items: list[dict[str, Any]] = []
     if isinstance(doc, PrescriptionDocument):
         for m in doc.medications:
+            clean_name, clean_dose, form = clean_medicine(m.name, m.dose)
             items.append({
                 "page_number": m.page, "item_type": "medication", "confidence": _clamp(m.confidence),
                 "payload": {
-                    "name": m.name, "generic_name": m.generic_name, "dose": m.dose, "route": m.route,
+                    "name": clean_name, "as_written": m.name, "form": form,
+                    "generic_name": m.generic_name, "dose": clean_dose, "route": m.route,
                     "frequency": m.frequency, "duration": m.duration, "instructions": m.instructions,
                     "prescriber": doc.prescriber, "clinic": doc.clinic, "start_date": doc.document_date,
                     "low_confidence_fields": m.low_confidence_fields,

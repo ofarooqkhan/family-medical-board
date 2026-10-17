@@ -286,3 +286,19 @@ def test_generic_document_with_medicines_gets_a_second_read_as_a_medication_list
     assert "medication_list" in extraction.SCHEMA_FOR_KIND and extraction.SCHEMA_FOR_KIND["medication_list"] is PrescriptionDocument
     import documents
     assert documents.model_reading(result) == "2 medicines, from Dr. Khan, dated 2026-09-01" or documents.model_reading(result).startswith("2 medicines")
+
+
+def test_clean_medicine_strips_form_and_duplicated_strength():
+    assert extraction.clean_medicine("Tab Metformin 500 mg", "500 mg") == ("Metformin", "500 mg", "tablet")
+    assert extraction.clean_medicine("Tab Amlodipine 5 mg", None) == ("Amlodipine", "5 mg", "tablet")
+    assert extraction.clean_medicine("Cap. Omeprazole 20mg", "20 mg") == ("Omeprazole", "20 mg", "capsule")
+    assert extraction.clean_medicine("Apixaban / Apixaget", "2.5 mg") == ("Apixaban / Apixaget", "2.5 mg", None)
+    assert extraction.clean_medicine("Metformin XR", "500 mg") == ("Metformin XR", "500 mg", None)
+    # A concentration is not a dose: left alone.
+    assert extraction.clean_medicine("Insulin glargine 100 units/ml", "10 units")[0] == "Insulin glargine 100 units/ml"
+    # A bare strength is never emptied into nothing.
+    assert extraction.clean_medicine("500 mg", None)[0] == "500 mg"
+    rx = PrescriptionDocument.model_validate(dict(RX, medications=[dict(RX["medications"][0], name="Tab Metformin 500 mg", dose="500 mg")]))
+    item = extraction.items_from_document("prescription", rx)[0]
+    assert item["payload"]["name"] == "Metformin" and item["payload"]["as_written"] == "Tab Metformin 500 mg"
+    assert item["payload"]["form"] == "tablet" and item["payload"]["dose"] == "500 mg"
